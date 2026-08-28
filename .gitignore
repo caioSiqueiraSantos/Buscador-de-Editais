@@ -38,3 +38,7 @@ yarn-error.log*
 # === SISTEMA OPERACIONAL ===
 .DS_Store
 Thumbs.db
+
+# === BANCO DE DADOS LOCAL ===
+*.db
+*.sqlite3
