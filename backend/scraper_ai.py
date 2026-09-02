@@ -1,104 +1,139 @@
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
 import os
 import json
 import sqlite3
 import requests
-from bs4 import BeautifulSoup
- 
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+
 load_dotenv()
-# A configuração agora é feita instanciando um Client:
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Temas de interesse do Metrô
 TEMAS = "Mobilidade, transporte sobre trilhos, MaaS, hidrogênio verde, blockchain, materiais avançados, energias renováveis, Indústria 4.0, inteligência artificial."
 
-def extrair_texto_pagina(url):
-    """Realiza o scraping de uma página de edital, isolando o conteúdo principal."""
+# 1. Pydantic Schema para Gemini e SQLite
+class Oportunidade(BaseModel):
+    titulo: str = Field(description="O título do edital ou chamada")
+    instituicao: str = Field(description="Órgão responsável, ex: FINEP, FAPESP")
+    categoria: str = Field(description="Deve ser: Edital, Evento, Curso ou Parceria")
+    resumo: str = Field(description="Resumo de no máximo 3 linhas sobre o que se trata")
+    tematica: str = Field(description="Tema principal do edital")
+    prazo: str = Field(description="Prazo limite. Use 'Não informado' se não achar")
+    aderencia: str = Field(description="Aderência aos temas do Metrô: Alto, Médio, Baixo")
+    link: str = Field(description="Link para acesso à chamada")
+
+def init_db():
+    """Inicializa o banco de dados com restrição UNIQUE no link para evitar duplicatas."""
+    conn = sqlite3.connect('oportunidades.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS oportunidades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            titulo TEXT,
+            instituicao TEXT,
+            categoria TEXT,
+            resumo TEXT,
+            tematica TEXT,
+            prazo TEXT,
+            aderencia TEXT,
+            link TEXT UNIQUE
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def consumir_api_oculta(url):
+    """Consome o endpoint REST da API oculta para extrair os dados brutos."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+        dados_json = response.json()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove tags indesejadas que sujam o prompt (menus, rodapés, scripts)
-        for tag in soup(['header', 'footer', 'nav', 'script', 'style', 'aside']):
-            tag.decompose()
-            
-        # Tenta focar no conteúdo principal (tag main, article ou div com classes comuns de conteúdo)
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', id='content') or soup.body
-        
-        if not main_content:
-            return ""
-            
-        texto_limpo = main_content.get_text(separator=' ', strip=True)
-        return texto_limpo[:4000] # Limite para não estourar o limite de tokens da API
+        # O endpoint da FINEP retorna os resultados na chave 'items'
+        itens = dados_json.get('items', [])
+        return itens
     except Exception as e:
-        print(f"Erro ao raspar {url}: {e}")
-        return ""
+        print(f"Erro ao acessar a API: {e}")
+        return []
 
-def analisar_com_ia(texto_bruto, link_original):
-    """Envia o texto para o Gemini forçando a saída em JSON."""
-    
+def analisar_item_com_ia(item_json, link_base):
+    """Envia o objeto JSON bruto para o Gemini e retorna um objeto Pydantic validado."""
     prompt = f"""
     Você é um analista de inovação de uma companhia de Metrô.
-    Analise o texto extraído de uma página de fomento/eventos e extraia as informações em formato JSON.
+    Analise os dados brutos JSON retornados por uma API de fomento e extraia as informações essenciais.
     
     Regras de Negócio:
     - Avalie a aderência (Alto, Médio, Baixo) aos seguintes temas do Metrô: {TEMAS}.
     - Categoria deve ser: Edital, Evento, Curso ou Parceria.
     - O resumo deve ter no máximo 3 linhas.
     
-    O JSON de saída deve ter EXATAMENTE as seguintes chaves:
-    "titulo", "instituicao", "categoria", "resumo", "tematica", "prazo" (use "Não informado" se não achar), "aderencia", "link".
+    Dados brutos da API (JSON da chamada):
+    {json.dumps(item_json, ensure_ascii=False)}
     
-    Texto bruto:
-    {texto_bruto}
-    
-    Link original para incluir no JSON: {link_original}
+    Note: Utilize a URL base abaixo e concatene com o id/referência da chamada para formar o link da oportunidade, ou extraia diretamente do JSON caso seja claro.
+    URL Base sugerida: {link_base}
     """
     
-    # Modelo atualizado e ativo na API Google GenAI
     response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
+            response_schema=Oportunidade,
+            temperature=0.2
         ),
     )
     
-    return json.loads(response.text)
+    # O pydantic valida e já cria a classe python estruturada
+    return Oportunidade.model_validate_json(response.text)
 
-def salvar_no_banco(dados_json):
+def salvar_no_banco(oportunidade: Oportunidade):
     conn = sqlite3.connect('oportunidades.db')
     cursor = conn.cursor()
     
-    cursor.execute('''
-        INSERT INTO oportunidades (titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, link)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        dados_json.get('titulo'), dados_json.get('instituicao'), dados_json.get('categoria'),
-        dados_json.get('resumo'), dados_json.get('tematica'), dados_json.get('prazo'),
-        dados_json.get('aderencia'), dados_json.get('link')
-    ))
-    conn.commit()
-    conn.close()
+    try:
+        # INSERT OR IGNORE garante a deduplicação silenciosa baseada no link UNIQUE
+        cursor.execute('''
+            INSERT OR IGNORE INTO oportunidades (titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, link)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            oportunidade.titulo, oportunidade.instituicao, oportunidade.categoria,
+            oportunidade.resumo, oportunidade.tematica, oportunidade.prazo,
+            oportunidade.aderencia, oportunidade.link
+        ))
+        
+        if cursor.rowcount > 0:
+            print(f"✅ Nova oportunidade salva: {oportunidade.titulo[:50]}...")
+        else:
+            print(f"⚠️ Oportunidade já existe no banco (Duplicata ignorada): {oportunidade.titulo[:50]}...")
+            
+        conn.commit()
+    except Exception as e:
+        print(f"Erro ao salvar no banco: {e}")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
-    # Exemplo prático usando um link real de chamadas da FINEP
-    url_alvo = "http://www.finep.gov.br/chamadas-publicas/chamadaspublicas" 
+    init_db()
     
-    print(f"Extraindo texto de: {url_alvo} ...")
-    texto_extraido = extrair_texto_pagina(url_alvo)
+    # Endpoint da FINEP fornecido para o GET
+    url_alvo = "https://www.finep.gov.br/o/c/chamadapublicas?sort=dataDePublicacao:desc&search=&page=1&pageSize=5"
+    link_base_finep = "https://www.finep.gov.br/chamadas-publicas/chamadapublica/"
     
-    if texto_extraido:
-        print("Analisando oportunidade com IA...")
-        resultado_json = analisar_com_ia(texto_extraido, url_alvo)
-        
-        salvar_no_banco(resultado_json)
-        print("Oportunidade salva com sucesso!")
-        print(json.dumps(resultado_json, indent=2, ensure_ascii=False))
+    print(f"Iniciando raspagem via API: {url_alvo} ...")
+    itens = consumir_api_oculta(url_alvo)
+    
+    if itens:
+        print(f"Encontrados {len(itens)} itens na API. Analisando os primeiros para a PoC...")
+        # Processando os primeiros itens para demonstração
+        for item in itens:
+            try:
+                print("\nEnviando item para análise da IA (Gemini)...")
+                resultado_pydantic = analisar_item_com_ia(item, link_base_finep)
+                salvar_no_banco(resultado_pydantic)
+            except Exception as e:
+                print(f"Erro ao processar item: {e}")
     else:
-        print("Falha ao extrair texto da página.")
+        print("Falha ao extrair itens da API ou a lista está vazia.")
