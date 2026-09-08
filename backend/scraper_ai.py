@@ -1,16 +1,25 @@
 import os
+import sys
 import json
 import sqlite3
 import requests
+
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
+import unicodedata
+import re
+
+from database import init_db, obter_temas_db
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-TEMAS = "Mobilidade, transporte sobre trilhos, MaaS, hidrogênio verde, blockchain, materiais avançados, energias renováveis, Indústria 4.0, inteligência artificial."
 
 # 1. Pydantic Schema para Gemini e SQLite
 class Oportunidade(BaseModel):
@@ -23,7 +32,63 @@ class Oportunidade(BaseModel):
     aderencia: str = Field(description="Aderência aos temas do Metrô: Alto, Médio, Baixo")
     link: str = Field(description="Link para acesso à chamada")
 
-from database import init_db
+def normalizar_texto(texto: str) -> str:
+    """Remove acentos e converte para minúsculas para comparação flexível."""
+    if not texto:
+        return ""
+    texto_sem_html = re.sub(r'<[^>]+>', ' ', str(texto))
+    nfkd = unicodedata.normalize('NFKD', texto_sem_html)
+    return "".join(c for c in nfkd if unicodedata.category(c) != 'Mn').lower()
+
+def extrair_valores_texto(item):
+    """Extrai recursivamente todos os valores textuais dos campos de um JSON/dict/list."""
+    valores = []
+    if isinstance(item, dict):
+        for v in item.values():
+            valores.extend(extrair_valores_texto(v))
+    elif isinstance(item, list):
+        for elem in item:
+            valores.extend(extrair_valores_texto(elem))
+    elif isinstance(item, (str, int, float)):
+        valores.append(str(item))
+    return valores
+
+def contem_palavra_chave(item_json: dict, temas: list[str]) -> tuple[bool, str]:
+    """
+    Verifica se o conteúdo do item contém ao menos um dos temas/palavras-chave cadastradas no banco.
+    Retorna (True, tema_encontrado) se houver correspondência, ou (False, '') caso contrário.
+    """
+    if not temas:
+        return True, "Todos os temas (banco sem restrições)"
+    
+    # Concatena todos os campos do JSON e normaliza
+    todos_textos = " ".join(extrair_valores_texto(item_json))
+    texto_normalizado = normalizar_texto(todos_textos)
+    
+    stop_words = {'para', 'sobre', 'como', 'com', 'sem', 'dos', 'das', 'uma', 'uns', 'umas', 'que', 'service'}
+
+    for tema in temas:
+        tema_norm = normalizar_texto(tema).strip()
+        if not tema_norm:
+            continue
+        
+        # 1. Correspondência direta do tema completo
+        if tema_norm in texto_normalizado:
+            return True, tema
+        
+        # 2. Correspondência por subtermos significativos (ex: "MaaS", "transporte sobre trilhos")
+        subtermos = re.split(r'[,;()\/]|\be\b|\bou\b', tema_norm)
+        for sub in subtermos:
+            sub_limpo = sub.strip()
+            if len(sub_limpo) >= 3 and sub_limpo in texto_normalizado:
+                return True, f"{tema} (termo: {sub_limpo})"
+            
+            # 3. Correspondência por palavras individuais relevantes do tema (ex: "mobilidade", "transporte", "trilhos")
+            for palavra in sub_limpo.split():
+                if len(palavra) >= 4 and palavra not in stop_words and palavra in texto_normalizado:
+                    return True, f"{tema} (palavra: {palavra})"
+                
+    return False, ""
 
 def oportunidade_ja_existe(link: str) -> bool:
     """Verifica no SQLite se uma oportunidade com esse link já foi cadastrada."""
@@ -66,22 +131,29 @@ def consumir_api_oculta(url):
         print(f"Erro ao acessar a API: {e}")
         return []
 
-def analisar_item_com_ia(item_json, link_base):
-    """Envia o objeto JSON bruto para o Gemini e retorna um objeto Pydantic validado."""
+def analisar_com_ia(bloco_enriquecido: dict, url_publica: str, temas_lista: list[str]) -> Oportunidade:
+    """Envia o bloco enriquecido de dados para o Gemini e retorna um objeto Pydantic validado."""
+    temas_str = ", ".join(temas_lista) if temas_lista else "Mobilidade, inovação tecnológica, transporte"
+    
     prompt = f"""
     Você é um analista de inovação de uma companhia de Metrô.
-    Analise os dados brutos JSON retornados por uma API de fomento e extraia as informações essenciais.
+    Analise os dados essenciais do edital enriquecido e extraia as informações estruturadas.
     
     Regras de Negócio:
-    - Avalie a aderência (Alto, Médio, Baixo) aos seguintes temas do Metrô: {TEMAS}.
-    - Categoria deve ser: Edital, Evento, Curso ou Parceria.
-    - O resumo deve ter no máximo 3 linhas.
+    - Avalie a aderência (Alto, Médio, Baixo) aos seguintes temas de interesse do Metrô: {temas_str}.
+    - Categoria deve ser estritamente: Edital, Evento, Curso ou Parceria.
+    - O resumo deve ter no máximo 3 linhas claras e objetivas.
+    - Prazo: extraia a data limite de submissão baseando-se no Prazo Proposto ({bloco_enriquecido.get('prazoProposto')}), Vigência Fim ({bloco_enriquecido.get('vigenciaFim')}) ou texto do edital. Use 'Não informado' se não identificar.
+    - Link: utilize a URL pública fornecida ({url_publica}).
     
-    Dados brutos da API (JSON da chamada):
-    {json.dumps(item_json, ensure_ascii=False)}
-    
-    Note: Utilize a URL base abaixo e concatene com o id/referência da chamada para formar o link da oportunidade, ou extraia diretamente do JSON caso seja claro.
-    URL Base sugerida: {link_base}
+    Bloco Enriquecido do Edital:
+    Título: {bloco_enriquecido.get('titulo')}
+    Descrição: {bloco_enriquecido.get('descricaoRawText')}
+    Categorias / Taxonomia: {bloco_enriquecido.get('categorias')}
+    Vigência Início: {bloco_enriquecido.get('vigenciaInicio')}
+    Vigência Fim: {bloco_enriquecido.get('vigenciaFim')}
+    Prazo Proposto (Submissão): {bloco_enriquecido.get('prazoProposto')}
+    URL Pública: {url_publica}
     """
     
     response = client.models.generate_content(
@@ -94,8 +166,14 @@ def analisar_item_com_ia(item_json, link_base):
         ),
     )
     
-    # O pydantic valida e já cria a classe python estruturada
-    return Oportunidade.model_validate_json(response.text)
+    oportunidade = Oportunidade.model_validate_json(response.text)
+    # Garante que o link persistido seja a url pública canônica
+    if not oportunidade.link or oportunidade.link.strip() == "":
+        oportunidade.link = url_publica
+    return oportunidade
+
+# Alias para compatibilidade
+analisar_item_com_ia = analisar_com_ia
 
 def salvar_no_banco(oportunidade: Oportunidade):
     conn = sqlite3.connect('oportunidades.db')
@@ -126,27 +204,98 @@ def salvar_no_banco(oportunidade: Oportunidade):
 if __name__ == "__main__":
     init_db()
     
-    # Endpoint da FINEP fornecido para o GET
-    url_alvo = "https://www.finep.gov.br/o/c/chamadapublicas?sort=dataDePublicacao:desc&search=&page=1&pageSize=5"
+    # Carregar temas dinâmicos do banco SQLite
+    temas_ativos = obter_temas_db()
+    print(f"📌 Temas/Palavras-chave ativas no banco ({len(temas_ativos)}):")
+    for t in temas_ativos:
+        print(f"   • {t}")
+    
+    # Endpoint REST da FINEP fornecido para o GET (dispensa BeautifulSoup)
+    url_alvo = "https://www.finep.gov.br/o/c/chamadapublicas"
     link_base_finep = "https://www.finep.gov.br/chamadas-publicas/chamadapublica/"
     
-    print(f"Iniciando raspagem via API: {url_alvo} ...")
+    print(f"\nIniciando raspagem via API: {url_alvo} ...")
     itens = consumir_api_oculta(url_alvo)
     
     if itens:
         print(f"Encontrados {len(itens)} itens na API. Analisando os itens para a PoC...")
         for item in itens:
             try:
-                # 1. Pré-verificação de duplicidade antes da chamada à IA (economiza tokens e tempo)
-                link_estimado = extrair_link_item(item, link_base_finep)
-                if link_estimado and oportunidade_ja_existe(link_estimado):
-                    print(f"⏭️ Oportunidade já existente no banco ({link_estimado}). Pulando chamada à IA...")
+                titulo_preview = (item.get('titulo') or 'Item sem título').strip()
+                item_id = item.get('id')
+                
+                # 1. Montagem dinâmica da URL pública combinando a URL base da FINEP com o id
+                if not item_id:
+                    print(f"⚠️ Item sem 'id' identificado: '{titulo_preview[:40]}'. Pulando...")
+                    continue
+                url_publica = f"{link_base_finep.rstrip('/')}/{item_id}"
+
+                # 2. Filtro de Custo: verifica a chave 'key' de 'situacao'. Se encerrado, pula o processamento
+                situacao = item.get('situacao') or {}
+                situacao_key = str(situacao.get('key', '')).lower().strip()
+                if situacao_key in ['encerrado', 'encerrada'] or situacao_key.startswith('encerrad'):
+                    print(f"⏭️ Edital '{titulo_preview[:45]}' está com situação '{situacao_key}'. Pulando...")
                     continue
 
-                print("\nEnviando item para análise da IA (Gemini)...")
-                resultado_pydantic = analisar_item_com_ia(item, link_base_finep)
+                # 3. Deduplicação Pré-IA baseada na URL pública
+                if oportunidade_ja_existe(url_publica):
+                    print(f"⏭️ Oportunidade já existente no banco ({url_publica}). Pulando...")
+                    continue
+
+                # 4. Extração segura de Taxonomia (.get())
+                categorias_lista = []
+                tema_principal = item.get('temaPrincipal') or {}
+                if isinstance(tema_principal, dict):
+                    nome_tema_p = tema_principal.get('name')
+                    if nome_tema_p:
+                        categorias_lista.append(nome_tema_p)
+                elif isinstance(tema_principal, str) and tema_principal:
+                    categorias_lista.append(tema_principal)
+
+                taxonomy_briefs = item.get('taxonomyCategoryBriefs') or []
+                if isinstance(taxonomy_briefs, list):
+                    for cat in taxonomy_briefs:
+                        if isinstance(cat, dict):
+                            cat_nome = cat.get('taxonomyCategoryName') or cat.get('name')
+                            if cat_nome and cat_nome not in categorias_lista:
+                                categorias_lista.append(cat_nome)
+                        elif isinstance(cat, str) and cat not in categorias_lista:
+                            categorias_lista.append(cat)
+
+                tema_geral = item.get('tema')
+                if tema_geral and tema_geral not in categorias_lista:
+                    categorias_lista.append(str(tema_geral))
+
+                categorias_str = "; ".join(categorias_lista) if categorias_lista else "Não informado"
+
+                # 5. Extração de Datas
+                vigencia_inicio = item.get('vigenciaInicio')
+                vigencia_fim = item.get('vigenciaFim')
+                prazo_proposto = item.get('prazoProposto')
+                descricao_limpa = (item.get('descricaoRawText') or item.get('descricao') or '').strip()
+
+                # 6. Bloco enriquecido com título, descrição limpa, categorias e datas
+                bloco_enriquecido = {
+                    "titulo": titulo_preview,
+                    "descricaoRawText": descricao_limpa,
+                    "categorias": categorias_str,
+                    "vigenciaInicio": vigencia_inicio or "Não informada",
+                    "vigenciaFim": vigencia_fim or "Não informada",
+                    "prazoProposto": prazo_proposto or "Não informado",
+                    "url_publica": url_publica
+                }
+
+                # 7. Filtro prévio por palavras-chave / temas dinâmicos no SQLite
+                corresponde, tema_detectado = contem_palavra_chave(bloco_enriquecido, temas_ativos)
+                if not corresponde:
+                    print(f"⏭️ Nenhuma palavra-chave encontrada no edital: '{titulo_preview[:45]}'. Ignorando conteúdo.")
+                    continue
                 
-                # 2. Verificação com o link final confirmado pela IA
+                print(f"\n🎯 Palavra-chave detectada: '{tema_detectado}' no edital: '{titulo_preview[:45]}'")
+                print("Enviando bloco enriquecido para análise e medição de aderência com a IA (Gemini)...")
+                resultado_pydantic = analisar_com_ia(bloco_enriquecido, url_publica, temas_ativos)
+                
+                # 8. Verificação final de duplicidade e persistência
                 if oportunidade_ja_existe(resultado_pydantic.link):
                     print(f"⏭️ Oportunidade com link '{resultado_pydantic.link}' já existe no banco. Pulando inserção.")
                     continue

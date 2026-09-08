@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import logo from './assets/NIT Logo.png';
+import GerenciadorTemas from './components/GerenciadorTemas';
 
 function App() {
   const [oportunidades, setOportunidades] = useState([])
@@ -7,8 +8,10 @@ function App() {
   const [filtroTema, setFiltroTema] = useState("")
   const [filtroPrazo, setFiltroPrazo] = useState("")
   const [loading, setLoading] = useState(true)
+  const [temasBanco, setTemasBanco] = useState([])
+  const [isModalTemasOpen, setIsModalTemasOpen] = useState(false)
 
-  useEffect(() => {
+  const carregarOportunidades = () => {
     fetch('http://localhost:8000/oportunidades')
       .then(response => response.json())
       .then(data => {
@@ -19,13 +22,26 @@ function App() {
         console.error("Erro ao buscar dados:", error)
         setLoading(false)
       })
+  }
+
+  const carregarTemasBanco = () => {
+    fetch('http://localhost:8000/temas')
+      .then(response => response.json())
+      .then(data => setTemasBanco(data))
+      .catch(error => console.error("Erro ao buscar temas:", error))
+  }
+
+  useEffect(() => {
+    carregarOportunidades()
+    carregarTemasBanco()
   }, [])
 
   // Extração de valores únicos para os filtros
   const temasUnicos = useMemo(() => {
-    const temas = oportunidades.map(op => op.tematica).filter(Boolean)
-    return [...new Set(temas)].sort()
-  }, [oportunidades])
+    const temasOps = oportunidades.map(op => op.tematica).filter(Boolean)
+    const temasDb = temasBanco.map(t => t.nome).filter(Boolean)
+    return [...new Set([...temasOps, ...temasDb])].sort()
+  }, [oportunidades, temasBanco])
 
   const prazosUnicos = useMemo(() => {
     const prazos = oportunidades.map(op => op.prazo).filter(Boolean)
@@ -35,7 +51,7 @@ function App() {
   const filtradas = oportunidades.filter(op => {
     const matchBusca = op.titulo?.toLowerCase().includes(busca.toLowerCase()) ||
       op.instituicao?.toLowerCase().includes(busca.toLowerCase())
-    const matchTema = filtroTema ? op.tematica === filtroTema : true
+    const matchTema = filtroTema ? (op.tematica === filtroTema || op.tematica?.toLowerCase().includes(filtroTema.toLowerCase())) : true
     const matchPrazo = filtroPrazo ? op.prazo === filtroPrazo : true
 
     return matchBusca && matchTema && matchPrazo
@@ -52,6 +68,13 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-cyan-500/30">
+      {/* Modal CRUD de Temas */}
+      <GerenciadorTemas
+        isOpen={isModalTemasOpen}
+        onClose={() => setIsModalTemasOpen(false)}
+        onTemasAtualizados={(novos) => setTemasBanco(novos)}
+      />
+
       <div className="max-w-7xl mx-auto px-4 py-12">
 
         {/* Header - Metro Style Signage */}
@@ -69,13 +92,29 @@ function App() {
           </div>
 
           <div className="flex flex-col gap-3 w-full lg:w-auto">
-            <input
-              type="text"
-              placeholder="Buscar edital ou instituição..."
-              className="w-full lg:w-[400px] bg-slate-900 border border-slate-700 rounded-full py-3 px-5 text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all placeholder:text-slate-500 shadow-inner"
-              value={busca}
-              onChange={(e) => setBusca(e.target.value)}
-            />
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Buscar edital ou instituição..."
+                className="flex-1 lg:w-[320px] bg-slate-900 border border-slate-700 rounded-full py-3 px-5 text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all placeholder:text-slate-500 shadow-inner"
+                value={busca}
+                onChange={(e) => setBusca(e.target.value)}
+              />
+              <button
+                onClick={() => setIsModalTemasOpen(true)}
+                className="bg-slate-900 hover:bg-slate-800 border border-cyan-500/50 hover:border-cyan-400 text-cyan-400 hover:text-white font-semibold py-3 px-4 rounded-full transition-all flex items-center gap-2 shadow-lg shadow-cyan-950/30 cursor-pointer text-sm whitespace-nowrap"
+                title="Gerenciar temas e palavras-chave de interesse"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                </svg>
+                <span>Temas</span>
+                <span className="bg-cyan-500/20 text-cyan-300 text-xs px-2 py-0.5 rounded-full border border-cyan-500/30">
+                  {temasBanco.length}
+                </span>
+              </button>
+            </div>
+
             <div className="flex flex-col sm:flex-row gap-3">
               <select
                 className="bg-slate-900 border border-slate-700 rounded-full py-2.5 px-4 text-sm text-slate-300 focus:outline-none focus:border-cyan-500 flex-1 appearance-none cursor-pointer"

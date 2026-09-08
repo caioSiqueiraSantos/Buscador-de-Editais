@@ -3,7 +3,7 @@
 Este documento detalha a stack tecnológica, a organização estrutural do projeto e as decisões arquiteturais da Prova de Conceito (PoC).
 
 ## 1. Stack Tecnológica
-*   **Ingestão de Dados:** Python com `requests` para consumo direto de APIs REST públicas/ocultas (JSON). *Nota: `beautifulsoup4` permanece instalado como ferramenta de fallback para páginas que não oferecem endpoints de dados estruturados.*
+*   **Ingestão de Dados:** Python com `requests` para consumo direto do endpoint REST JSON da FINEP. Os metadados estruturados (título, descrição limpa, taxonomia, situação e datas de vigência) são extraídos diretamente do payload paginado, dispensando ferramentas de parsing HTML como BeautifulSoup.
 *   **Motor de IA:** Google Gemini API via novo SDK oficial (`google-genai`), modelo **`gemini-3.5-flash-lite`**, com validação estrita de esquema estruturado via **`Pydantic`** (`types.GenerateContentConfig(response_schema=Oportunidade)`).
 *   **Backend (API):** Python com `FastAPI` e servidor ASGI `Uvicorn` para servir os dados na porta `8000`.
 *   **Banco de Dados:** `SQLite` (arquivo local `oportunidades.db`) com operações SQL diretas via `sqlite3`.
@@ -17,9 +17,9 @@ Buscador-de-Editais/
 ├── backend/
 │   ├── .env                     # Chaves de API (ex: GEMINI_API_KEY)
 │   ├── database.py              # Inicialização e migração do SQLite (schema centralizado)
-│   ├── scraper_ai.py            # Script de ingestão, análise via Gemini e persistência
-│   ├── main.py                  # API REST FastAPI (endpoints para o frontend)
-│   ├── oportunidades.db         # Banco de dados SQLite local
+│   ├── scraper_ai.py            # Script de ingestão, filtro de palavras-chave e IA
+│   ├── main.py                  # API REST FastAPI (endpoints de oportunidades e CRUD de temas)
+│   ├── oportunidades.db         # Banco de dados SQLite local (tabelas: oportunidades, temas)
 │   ├── requirements.txt         # Dependências do backend Python
 │   └── venv/                    # Ambiente virtual Python
 ├── doc/
@@ -33,7 +33,9 @@ Buscador-de-Editais/
     ├── index.html               
     ├── vite.config.js
     └── src/
-        ├── App.jsx              # Interface principal com busca e filtros dinâmicos
+        ├── App.jsx              # Interface principal com busca, filtros e acionador do modal
+        ├── components/
+        │   └── GerenciadorTemas.jsx # Modal interativo com CRUD completo de temas/palavras-chave
         ├── App.css
         └── index.css            
 ```
@@ -42,7 +44,9 @@ Buscador-de-Editais/
 
 *   **Separação entre Ingestão (Batch) e API (Serving):**
     *   `scraper_ai.py` funciona como um processo de coleta e processamento em lote (*batch*), executado sob demanda ou agendamento via terminal (`python scraper_ai.py`).
-    *   `main.py` atua exclusivamente como servidor de leitura (`SELECT`) para o frontend, mantendo alta performance e isolamento de falhas.
+    *   `main.py` serve as oportunidades (`GET /oportunidades`) e gerencia o ciclo de vida dos temas via CRUD REST (`GET`, `POST`, `PUT`, `DELETE /temas`).
+*   **Filtro Lexical Pré-IA:**
+    *   Antes de submeter itens brutos ao Gemini, o coletor confronta os campos do edital contra a base ativa de temas/palavras-chave no SQLite. Itens sem aderência lexical são descartados imediatamente, reduzindo chamadas desnecessárias à API de IA.
 *   **Deduplicação em Duas Camadas:**
     1.  *Camada de Negócio / Aplicação:* Verificação prévia no SQLite do link estimado da chamada antes de acionar a IA, economizando 100% dos tokens de chamadas repetidas.
     2.  *Camada de Persistência:* Restrição `link TEXT UNIQUE` e uso de `INSERT OR IGNORE` para integridade transacional contra concorrência ou links equivalentes.
