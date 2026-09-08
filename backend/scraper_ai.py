@@ -23,25 +23,33 @@ class Oportunidade(BaseModel):
     aderencia: str = Field(description="Aderência aos temas do Metrô: Alto, Médio, Baixo")
     link: str = Field(description="Link para acesso à chamada")
 
-def init_db():
-    """Inicializa o banco de dados com restrição UNIQUE no link para evitar duplicatas."""
+from database import init_db
+
+def oportunidade_ja_existe(link: str) -> bool:
+    """Verifica no SQLite se uma oportunidade com esse link já foi cadastrada."""
+    if not link:
+        return False
     conn = sqlite3.connect('oportunidades.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS oportunidades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            titulo TEXT,
-            instituicao TEXT,
-            categoria TEXT,
-            resumo TEXT,
-            tematica TEXT,
-            prazo TEXT,
-            aderencia TEXT,
-            link TEXT UNIQUE
-        )
-    ''')
-    conn.commit()
+    cursor.execute('SELECT 1 FROM oportunidades WHERE link = ?', (link,))
+    existe = cursor.fetchone() is not None
     conn.close()
+    return existe
+
+def extrair_link_item(item_json: dict, link_base: str):
+    """Tenta inferir o link da oportunidade antes da chamada ao Gemini para checagem prévia de duplicidade."""
+    candidato = (
+        item_json.get('link') or 
+        item_json.get('url') or 
+        item_json.get('id') or 
+        item_json.get('codigo')
+    )
+    if candidato:
+        candidato_str = str(candidato).strip()
+        if candidato_str.startswith('http'):
+            return candidato_str
+        return f"{link_base.rstrip('/')}/{candidato_str.lstrip('/')}"
+    return None
 
 def consumir_api_oculta(url):
     """Consome o endpoint REST da API oculta para extrair os dados brutos."""
@@ -126,12 +134,23 @@ if __name__ == "__main__":
     itens = consumir_api_oculta(url_alvo)
     
     if itens:
-        print(f"Encontrados {len(itens)} itens na API. Analisando os primeiros para a PoC...")
-        # Processando os primeiros itens para demonstração
+        print(f"Encontrados {len(itens)} itens na API. Analisando os itens para a PoC...")
         for item in itens:
             try:
+                # 1. Pré-verificação de duplicidade antes da chamada à IA (economiza tokens e tempo)
+                link_estimado = extrair_link_item(item, link_base_finep)
+                if link_estimado and oportunidade_ja_existe(link_estimado):
+                    print(f"⏭️ Oportunidade já existente no banco ({link_estimado}). Pulando chamada à IA...")
+                    continue
+
                 print("\nEnviando item para análise da IA (Gemini)...")
                 resultado_pydantic = analisar_item_com_ia(item, link_base_finep)
+                
+                # 2. Verificação com o link final confirmado pela IA
+                if oportunidade_ja_existe(resultado_pydantic.link):
+                    print(f"⏭️ Oportunidade com link '{resultado_pydantic.link}' já existe no banco. Pulando inserção.")
+                    continue
+
                 salvar_no_banco(resultado_pydantic)
             except Exception as e:
                 print(f"Erro ao processar item: {e}")

@@ -1,32 +1,60 @@
 # Fluxo de Dados e Processamento
 
-Este documento descreve o ciclo de vida da informação, desde a origem (sites de fomento) até a tela do usuário.
+Este documento descreve o ciclo de vida da informação, desde a origem (APIs de fomento) até a tela do usuário no painel de inovação.
 
-## 1. Ingestão (Web Scraping)
-1.  O script `scraper_ai.py` é executado.
-2.  A biblioteca `requests` faz chamadas HTTP GET para os sites-alvo (ex: páginas específicas de editais da FAPESP ou FINEP).
-3.  O `BeautifulSoup` limpa o HTML, extraindo apenas o texto visível da página (limitado a ~4000 caracteres para otimizar tokens).
+## 1. Ingestão (API REST Pública)
+1. O script `scraper_ai.py` é iniciado (via terminal ou rotina agendada).
+2. A biblioteca `requests` faz uma requisição HTTP GET para a API de chamadas públicas da FINEP:
+   `https://www.finep.gov.br/o/c/chamadapublicas?sort=dataDePublicacao:desc&search=&page=1&pageSize=5`
+3. A resposta JSON é desserializada nativamente (`response.json()`), obtendo a lista de itens recentes em formato estruturado.
 
-## 2. Processamento Semântico (IA)
-1.  O texto bruto extraído, junto com o link original e um *System Prompt* rigoroso contendo as regras de negócio do Metrô, é enviado para a API do Google Gemini.
-2.  A API processa o conteúdo, cruza com os critérios de "Temas de Interesse" e devolve uma resposta estritamente estruturada em JSON (usando `response_mime_type="application/json"`).
+## 2. Pré-filtro de Deduplicação (Otimização de Custos da IA)
+1. Para cada item da lista, o script extrai ou infere o identificador/link da chamada (`extrair_link_item`).
+2. É realizada uma consulta prévia no banco local SQLite (`oportunidade_ja_existe`):
+   * Se o link já estiver cadastrado: a chamada ao Gemini é **pulada imediatamente**, economizando 100% dos tokens da requisição.
+   * Se o link for novo: o item segue para processamento semântico.
 
-## 3. Persistência (Banco de Dados)
-1.  O Python intercepta o JSON gerado pelo Gemini.
-2.  Os dados são mapeados e inseridos via comando `INSERT INTO` na tabela `oportunidades` do `oportunidades.db` (SQLite).
-3.  Um *timestamp* (`data_coleta`) é gerado automaticamente pelo banco para controle cronológico.
+## 3. Processamento Semântico e Validação com IA
+1. O payload JSON bruto do item, juntamente com o link base sugerido e as diretrizes estratégicas de inovação do Metrô, é enviado para a API do Google Gemini.
+2. O modelo **`gemini-3.5-flash-lite`** processa as regras de negócio:
+   * Classifica a aderência (`Alto`, `Médio`, `Baixo`).
+   * Normaliza a categoria (`Edital`, `Evento`, `Curso`, `Parceria`).
+   * Gera um resumo de no máximo 3 linhas.
+   * Identifica temáticas e prazos limite.
+3. A resposta é validada e tipada rigorosamente através do schema **Pydantic** (`Oportunidade.model_validate_json`), prevenindo inconsistências de tipo ou estrutura.
 
-## 4. Distribuição (API REST)
-1.  O servidor `FastAPI` (rodando via `main.py`) fica escutando requisições na porta 8000.
-2.  Quando a rota `GET /oportunidades` é acionada, o sistema executa um `SELECT * FROM oportunidades ORDER BY data_coleta DESC`.
-3.  Os dados são serializados em um array de objetos JSON e devolvidos ao cliente.
+## 4. Persistência e Deduplicação no Banco (SQLite)
+1. O objeto `Oportunidade` validado é submetido à função `salvar_no_banco()`.
+2. Os dados são persistidos via `INSERT OR IGNORE INTO oportunidades`:
+   * A restrição `link TEXT UNIQUE` garante que nenhuma duplicata seja gravada, mesmo em casos de concorrência ou variações de link.
+   * O campo `data_coleta` recebe automaticamente a data e hora do momento da inserção (`CURRENT_TIMESTAMP`).
 
-## 5. Consumo e Visualização (Frontend React)
-1.  O usuário abre a aplicação React no navegador (`localhost:5173`).
-2.  O hook `useEffect` no componente `App.jsx` faz um `fetch` para a API local.
-3.  O estado `oportunidades` é populado com os dados.
-4.  O sistema renderiza os "Cards" dinâmicos com estilização condicional (ex: cores diferentes para níveis de aderência).
-5.  O usuário pode usar o *input* de busca para filtrar instantaneamente (Client-side filtering) os dados carregados usando JavaScript nativo.
+## 5. Distribuição (API REST FastAPI)
+1. O servidor ASGI `uvicorn` executa a aplicação `main.py` escutando na porta `8000` via protocolo HTTP (`http://127.0.0.1:8000`).
+2. Quando a rota `GET /oportunidades` é requisitada:
+   * Uma conexão SQLite é aberta com `sqlite3.Row` para serialização em dicionário.
+   * Os dados são recuperados em ordem cronológica decrescente: `SELECT * FROM oportunidades ORDER BY data_coleta DESC`.
+   * A API devolve um array JSON formatado com os registros disponíveis.
+   * A documentação interativa Swagger está disponível em `http://127.0.0.1:8000/docs`.
 
-## Diagrama Lógico Simplificado
-`Sites de Fomento` -> `BeautifulSoup (Texto Bruto)` -> `Gemini API (JSON Estruturado)` -> `SQLite (Persistência)` -> `FastAPI (Endpoint)` -> `React (Visualização)`
+## 6. Consumo e Visualização (Frontend React)
+1. O usuário acessa o painel web no navegador em `http://localhost:5173`.
+2. O hook `useEffect` em `App.jsx` realiza uma requisição `fetch('http://localhost:8000/oportunidades')`.
+3. O estado `oportunidades` é preenchido e a interface renderiza os cards visuais.
+4. O usuário conta com filtros reativos em tempo real no cliente:
+   * Filtro por temática estratégica (MaaS, Mobilidade sobre trilhos, etc.).
+   * Filtro por prazos.
+   * Busca textual livre por título ou instituição.
+   * Indicadores visuais de aderência baseados na identidade visual de sinalização do Metrô.
+
+## Diagrama Lógico do Pipeline
+
+```mermaid
+flowchart LR
+    A[API FINEP REST] -->|JSON Bruto| B[Pré-checagem SQLite]
+    B -->|Se já existe| C[Pula item / Economiza Tokens]
+    B -->|Se novo| D[Gemini 3.5 Flash Lite + Pydantic]
+    D -->|Oportunidade Validada| E[SQLite com link UNIQUE]
+    E -->|SELECT ORDER BY data_coleta| F[FastAPI :8000 HTTP]
+    F -->|fetch JSON| G[React Vite :5173 UI]
+```
