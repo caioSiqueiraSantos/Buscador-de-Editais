@@ -131,6 +131,27 @@ def consumir_api_oculta(url):
         print(f"Erro ao acessar a API: {e}")
         return []
 
+ANO_MINIMO_RELEVANTE = 2025 # Ignora editais históricos anteriores a 2025 para poupar processamento e tokens
+
+def edital_eh_muito_antigo(item: dict, ano_minimo: int = ANO_MINIMO_RELEVANTE) -> tuple[bool, str]:
+    """
+    Verifica se o edital é muito antigo com base na data de publicação ou vigência.
+    Retorna (True, motivo) se for antigo, ou (False, '') caso contrário.
+    """
+    data_pub = str(item.get('dataDePublicacao') or '').strip()
+    if len(data_pub) >= 4 and data_pub[:4].isdigit():
+        ano_pub = int(data_pub[:4])
+        if ano_pub < ano_minimo:
+            return True, f"publicado em {ano_pub} (anterior a {ano_minimo})"
+
+    vigencia_fim = str(item.get('vigenciaFim') or '').strip()
+    if len(vigencia_fim) >= 4 and vigencia_fim[:4].isdigit():
+        ano_fim = int(vigencia_fim[:4])
+        if ano_fim < ano_minimo:
+            return True, f"vigência encerrada em {ano_fim} (anterior a {ano_minimo})"
+
+    return False, ""
+
 def analisar_com_ia(bloco_enriquecido: dict, url_publica: str, temas_lista: list[str]) -> Oportunidade:
     """Envia o bloco enriquecido de dados para o Gemini e retorna um objeto Pydantic validado."""
     temas_str = ", ".join(temas_lista) if temas_lista else "Mobilidade, inovação tecnológica, transporte"
@@ -210,8 +231,8 @@ if __name__ == "__main__":
     for t in temas_ativos:
         print(f"   • {t}")
     
-    # Endpoint REST da FINEP fornecido para o GET (dispensa BeautifulSoup)
-    url_alvo = "https://www.finep.gov.br/o/c/chamadapublicas"
+    # Endpoint REST da FINEP ordenado pelas chamadas mais recentes (dispensa BeautifulSoup)
+    url_alvo = "https://www.finep.gov.br/o/c/chamadapublicas?sort=dataDePublicacao:desc"
     link_base_finep = "https://www.finep.gov.br/chamadas-publicas/chamadapublica/"
     
     print(f"\nIniciando raspagem via API: {url_alvo} ...")
@@ -230,14 +251,20 @@ if __name__ == "__main__":
                     continue
                 url_publica = f"{link_base_finep.rstrip('/')}/{item_id}"
 
-                # 2. Filtro de Custo: verifica a chave 'key' de 'situacao'. Se encerrado, pula o processamento
+                # 2. Filtro Temporal: Ignora editais muito antigos (economiza tokens e processamento)
+                eh_antigo, motivo_antigo = edital_eh_muito_antigo(item)
+                if eh_antigo:
+                    print(f"⏭️ Edital '{titulo_preview[:45]}' ignorado: {motivo_antigo}.")
+                    continue
+
+                # 3. Filtro de Custo: verifica a chave 'key' de 'situacao'. Se encerrado, pula o processamento
                 situacao = item.get('situacao') or {}
                 situacao_key = str(situacao.get('key', '')).lower().strip()
                 if situacao_key in ['encerrado', 'encerrada'] or situacao_key.startswith('encerrad'):
                     print(f"⏭️ Edital '{titulo_preview[:45]}' está com situação '{situacao_key}'. Pulando...")
                     continue
 
-                # 3. Deduplicação Pré-IA baseada na URL pública
+                # 4. Deduplicação Pré-IA baseada na URL pública
                 if oportunidade_ja_existe(url_publica):
                     print(f"⏭️ Oportunidade já existente no banco ({url_publica}). Pulando...")
                     continue
