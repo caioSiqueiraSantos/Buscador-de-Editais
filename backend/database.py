@@ -16,15 +16,18 @@ def init_db():
             prazo TEXT,
             aderencia TEXT,
             link TEXT UNIQUE,
-            data_coleta TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            data_coleta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            descricaoRawText TEXT
         )
     ''')
 
-    # Garantir compatibilidade caso a tabela já tenha sido criada sem a coluna data_coleta
+    # Garantir compatibilidade caso a tabela já tenha sido criada sem colunas novas
     cursor.execute("PRAGMA table_info(oportunidades)")
     colunas = [info[1] for info in cursor.fetchall()]
     if 'data_coleta' not in colunas:
         cursor.execute("ALTER TABLE oportunidades ADD COLUMN data_coleta TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    if 'descricaoRawText' not in colunas:
+        cursor.execute("ALTER TABLE oportunidades ADD COLUMN descricaoRawText TEXT")
 
     # Garantir índice único para deduplicação mesmo em bancos criados anteriormente
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_oportunidades_link ON oportunidades(link)")

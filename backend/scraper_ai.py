@@ -3,6 +3,8 @@ import sys
 import json
 import sqlite3
 import requests
+import urllib.parse
+from typing import Optional
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -31,6 +33,7 @@ class Oportunidade(BaseModel):
     prazo: str = Field(description="Prazo limite. Use 'Não informado' se não achar")
     aderencia: str = Field(description="Aderência aos temas do Metrô: Alto, Médio, Baixo")
     link: str = Field(description="Link para acesso à chamada")
+    descricaoRawText: Optional[str] = Field(default="", description="Texto completo bruto da descrição do edital")
 
 def normalizar_texto(texto: str) -> str:
     """Remove acentos e converte para minúsculas para comparação flexível."""
@@ -90,13 +93,26 @@ def contem_palavra_chave(item_json: dict, temas: list[str]) -> tuple[bool, str]:
                 
     return False, ""
 
-def oportunidade_ja_existe(link: str) -> bool:
-    """Verifica no SQLite se uma oportunidade com esse link já foi cadastrada."""
-    if not link:
+def oportunidade_ja_existe(link: str, titulo: str = "") -> bool:
+    """Verifica no SQLite se uma oportunidade já foi cadastrada e já possui descricaoRawText retido na íntegra."""
+    if not link and not titulo:
         return False
     conn = sqlite3.connect('oportunidades.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM oportunidades WHERE link = ?', (link,))
+    if titulo:
+        cursor.execute('''
+            SELECT 1 FROM oportunidades 
+            WHERE (link = ? OR titulo = ?) 
+              AND descricaoRawText IS NOT NULL 
+              AND descricaoRawText != ''
+        ''', (link, titulo))
+    else:
+        cursor.execute('''
+            SELECT 1 FROM oportunidades 
+            WHERE link = ? 
+              AND descricaoRawText IS NOT NULL 
+              AND descricaoRawText != ''
+        ''', (link,))
     existe = cursor.fetchone() is not None
     conn.close()
     return existe
@@ -188,9 +204,10 @@ def analisar_com_ia(bloco_enriquecido: dict, url_publica: str, temas_lista: list
     )
     
     oportunidade = Oportunidade.model_validate_json(response.text)
-    # Garante que o link persistido seja a url pública canônica
-    if not oportunidade.link or oportunidade.link.strip() == "":
-        oportunidade.link = url_publica
+    # Garante que o link de saída seja o proxy seguro de busca do Google
+    oportunidade.link = url_publica
+    # Garante a retenção integral do conteúdo bruto original (descricaoRawText)
+    oportunidade.descricaoRawText = bloco_enriquecido.get('descricaoRawText', '')
     return oportunidade
 
 # Alias para compatibilidade
@@ -200,21 +217,33 @@ def salvar_no_banco(oportunidade: Oportunidade):
     conn = sqlite3.connect('oportunidades.db')
     cursor = conn.cursor()
     
+    texto_completo = oportunidade.descricaoRawText or ""
+    
     try:
-        # INSERT OR IGNORE garante a deduplicação silenciosa baseada no link UNIQUE
-        cursor.execute('''
-            INSERT OR IGNORE INTO oportunidades (titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            oportunidade.titulo, oportunidade.instituicao, oportunidade.categoria,
-            oportunidade.resumo, oportunidade.tematica, oportunidade.prazo,
-            oportunidade.aderencia, oportunidade.link
-        ))
+        # Verifica se já existe por link ou título para atualizar ou inserir
+        cursor.execute('SELECT id FROM oportunidades WHERE link = ? OR titulo = ?', (oportunidade.link, oportunidade.titulo))
+        existente = cursor.fetchone()
         
-        if cursor.rowcount > 0:
-            print(f"✅ Nova oportunidade salva: {oportunidade.titulo[:50]}...")
+        if existente:
+            cursor.execute('''
+                UPDATE oportunidades 
+                SET link = ?, descricaoRawText = ?, resumo = ?, prazo = ?, aderencia = ?
+                WHERE id = ?
+            ''', (
+                oportunidade.link, texto_completo,
+                oportunidade.resumo, oportunidade.prazo, oportunidade.aderencia, existente[0]
+            ))
+            print(f"🔄 Oportunidade atualizada (proxy Google + retenção texto): {oportunidade.titulo[:50]}...")
         else:
-            print(f"⚠️ Oportunidade já existe no banco (Duplicata ignorada): {oportunidade.titulo[:50]}...")
+            cursor.execute('''
+                INSERT INTO oportunidades (titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, link, descricaoRawText)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                oportunidade.titulo, oportunidade.instituicao, oportunidade.categoria,
+                oportunidade.resumo, oportunidade.tematica, oportunidade.prazo,
+                oportunidade.aderencia, oportunidade.link, texto_completo
+            ))
+            print(f"✅ Nova oportunidade salva: {oportunidade.titulo[:50]}...")
             
         conn.commit()
     except Exception as e:
@@ -243,13 +272,10 @@ if __name__ == "__main__":
         for item in itens:
             try:
                 titulo_preview = (item.get('titulo') or 'Item sem título').strip()
-                item_id = item.get('id')
                 
-                # 1. Montagem dinâmica da URL pública combinando a URL base da FINEP com o id
-                if not item_id:
-                    print(f"⚠️ Item sem 'id' identificado: '{titulo_preview[:40]}'. Pulando...")
-                    continue
-                url_publica = f"{link_base_finep.rstrip('/')}/{item_id}"
+                # 1. Montagem dinâmica da URL pública via proxy seguro de busca do Google (evita erros 404)
+                titulo_codificado = urllib.parse.quote(titulo_preview)
+                url_publica = f"https://www.google.com/search?q=site:finep.gov.br+{titulo_codificado}"
 
                 # 2. Filtro Temporal: Ignora editais muito antigos (economiza tokens e processamento)
                 eh_antigo, motivo_antigo = edital_eh_muito_antigo(item)
@@ -264,9 +290,9 @@ if __name__ == "__main__":
                     print(f"⏭️ Edital '{titulo_preview[:45]}' está com situação '{situacao_key}'. Pulando...")
                     continue
 
-                # 4. Deduplicação Pré-IA baseada na URL pública
-                if oportunidade_ja_existe(url_publica):
-                    print(f"⏭️ Oportunidade já existente no banco ({url_publica}). Pulando...")
+                # 4. Deduplicação Pré-IA baseada na URL pública e título
+                if oportunidade_ja_existe(url_publica, titulo_preview):
+                    print(f"⏭️ Oportunidade já existente e retida no banco ({titulo_preview[:45]}). Pulando...")
                     continue
 
                 # 4. Extração segura de Taxonomia (.get())

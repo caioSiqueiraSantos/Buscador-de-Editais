@@ -43,8 +43,9 @@ Armazena as oportunidades validadas e classificadas pela IA:
 | `tematica` | `TEXT` | Tema principal identificado na chamada |
 | `prazo` | `TEXT` | Prazo limite de submissão (ou "Não informado") |
 | `aderencia` | `TEXT` | Nível de alinhamento com os temas do Metrô: `Alto`, `Médio` ou `Baixo` |
-| `link` | `TEXT UNIQUE` | URL de acesso à chamada pública (**chave de deduplicação**) |
+| `link` | `TEXT UNIQUE` | URL de acesso gerada via proxy de busca Google (`https://www.google.com/search?q=site:finep.gov.br+{titulo}`) para evitar 404 |
 | `data_coleta` | `TIMESTAMP` | Registro temporal gerado automaticamente pelo banco para ordenação |
+| `descricaoRawText` | `TEXT` | Texto bruto original retido na íntegra para consulta interna sem dependência externa |
 
 ### Tabela `temas`
 Armazena os temas e palavras-chave gerenciáveis pelo usuário via CRUD:

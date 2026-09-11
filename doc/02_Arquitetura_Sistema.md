@@ -50,6 +50,10 @@ Buscador-de-Editais/
 *   **Deduplicação em Duas Camadas:**
     1.  *Camada de Negócio / Aplicação:* Verificação prévia no SQLite do link estimado da chamada antes de acionar a IA, economizando 100% dos tokens de chamadas repetidas.
     2.  *Camada de Persistência:* Restrição `link TEXT UNIQUE` e uso de `INSERT OR IGNORE` para integridade transacional contra concorrência ou links equivalentes.
+*   **Resiliência Contra Erros 404 (Proxy de Busca Google):**
+    *   Como links diretos de portais governamentais sofrem constantes refatorações e retornos 404, o coletor utiliza `urllib.parse.quote` no título do edital e gera uma URL pública de busca direcionada: `https://www.google.com/search?q=site:finep.gov.br+{titulo_codificado}`.
+*   **Retenção Integral de Conteúdo (`descricaoRawText`):**
+    *   O texto completo da chamada é persistido na íntegra no SQLite e servido via API REST. O frontend em React disponibiliza a leitura interna desse conteúdo em modal dedicado, eliminando a dependência de disponibilidade imediata do portal de origem.
 *   **Ambiente e Protocolo de Execução Local:**
     *   O Uvicorn executa em **HTTP puro** (`http://127.0.0.1:8000`). Não há certificado SSL configurado localmente; portanto, tentativas de acesso com `https://` resultarão em falha de conexão (`ERR_SSL_PROTOCOL_ERROR`).
     *   A documentação interativa da API está disponível via Swagger UI em `http://127.0.0.1:8000/docs`.

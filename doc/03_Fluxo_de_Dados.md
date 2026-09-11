@@ -17,19 +17,20 @@ Este documento descreve o ciclo de vida da informação, desde a origem (APIs de
    * **Se houver correspondência:** a palavra-chave detectada é registrada e o item avança para a análise semântica.
 
 ## 3. Processamento Semântico e Validação com IA
-1. O payload JSON bruto do item, juntamente com o link base sugerido e a **relação dinâmica de temas estratégicos obtida do banco**, é enviado para a API do Google Gemini.
-2. O modelo **`gemini-3.5-flash-lite`** processa as regras de negócio:
-   * Avalia e mede o nível de aderência aos temas configurados (`Alto`, `Médio`, `Baixo`).
-   * Normaliza a categoria (`Edital`, `Evento`, `Curso`, `Parceria`).
-   * Gera um resumo de no máximo 3 linhas.
-   * Identifica temáticas e prazos limite.
-3. A resposta é validada e tipada rigorosamente através do schema **Pydantic** (`Oportunidade.model_validate_json`), prevenindo inconsistências de tipo ou estrutura.
+1. O coletor gera a URL pública segura usando a biblioteca nativa `urllib.parse`:
+   `titulo_codificado = urllib.parse.quote(titulo)`
+   `url_publica = f"https://www.google.com/search?q=site:finep.gov.br+{titulo_codificado}"`
+2. O payload JSON enriquecido (título, descrição limpa `descricaoRawText`, taxonomia e datas), juntamente com os temas ativos, é enviado para o modelo **`gemini-3.5-flash-lite`**.
+3. A IA processa:
+   * Classificação de aderência (`Alto`, `Médio`, `Baixo`).
+   * Normalização da categoria (`Edital`, `Evento`, `Curso`, `Parceria`).
+   * Resumo de até 3 linhas e identificação do prazo.
+4. O retorno do modelo é associado ao `url_publica` e ao `descricaoRawText` original na íntegra.
 
-## 4. Persistência e Deduplicação no Banco (SQLite)
-1. O objeto `Oportunidade` validado é submetido à função `salvar_no_banco()`.
-2. Os dados são persistidos via `INSERT OR IGNORE INTO oportunidades`:
-   * A restrição `link TEXT UNIQUE` garante que nenhuma duplicata seja gravada, mesmo em casos de concorrência ou variações de link.
-   * O campo `data_coleta` recebe automaticamente a data e hora do momento da inserção (`CURRENT_TIMESTAMP`).
+## 4. Persistência e Retenção no Banco (SQLite)
+1. O objeto `Oportunidade` é persistido na tabela `oportunidades`.
+2. O campo `descricaoRawText` armazena o texto completo da chamada, permitindo consultas internas sem depender de páginas externas que podem retornar 404.
+3. O campo `link` armazena o link de busca proxy do Google.
 
 ## 5. Distribuição (API REST FastAPI)
 1. O servidor ASGI `uvicorn` executa a aplicação `main.py` escutando na porta `8000` via protocolo HTTP (`http://127.0.0.1:8000`).
