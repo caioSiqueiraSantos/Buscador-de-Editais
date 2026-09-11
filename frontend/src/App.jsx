@@ -438,7 +438,7 @@ function App() {
                   rel="noreferrer"
                   className="flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-bold text-white bg-cyan-600 hover:bg-cyan-500 transition-all shadow-lg shadow-cyan-900/40"
                 >
-                  <span>Buscar na FINEP (Google)</span>
+                  <span>Buscar na FINEP</span>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                   </svg>
