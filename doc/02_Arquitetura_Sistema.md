@@ -1,63 +1,96 @@
-# Arquitetura do Sistema (PoC)
+# Arquitetura do Sistema
 
-Este documento detalha a stack tecnológica, a organização estrutural do projeto e as decisões arquiteturais da Prova de Conceito (PoC).
+## 1. Visão da solução
 
-## 1. Stack Tecnológica
-*   **Ingestão de Dados:** Python com `requests` para consumo direto do endpoint REST JSON da FINEP. Os metadados estruturados (título, descrição limpa, taxonomia, situação e datas de vigência) são extraídos diretamente do payload paginado, dispensando ferramentas de parsing HTML como BeautifulSoup.
-*   **Motor de IA:** Google Gemini API via novo SDK oficial (`google-genai`), modelo **`gemini-3.5-flash-lite`**, com validação estrita de esquema estruturado via **`Pydantic`** (`types.GenerateContentConfig(response_schema=Oportunidade)`).
-*   **Backend (API):** Python com `FastAPI` e servidor ASGI `Uvicorn` para servir os dados na porta `8000`.
-*   **Banco de Dados:** `SQLite` (arquivo local `oportunidades.db`) com operações SQL diretas via `sqlite3`.
-*   **Frontend:** Single Page Application (SPA) com `React`, empacotada via `Vite` (porta `5173`).
-*   **Estilização:** `Tailwind CSS` (via PostCSS) com tema escuro e elementos visuais no padrão do Metrô.
+```text
+Usuário
+   |
+   v
+Frontend React/Vite publicado
+   |
+   | HTTPS / JSON
+   v
+API FastAPI publicada
+   |
+   | conexão privada por variável de ambiente
+   v
+PostgreSQL hospedado
 
-## 2. Estrutura de Diretórios
+Scraper FINEP + Gemini
+   | execução manual pelo terminal
+   +-----------------------> PostgreSQL hospedado
+```
+
+O frontend não acessa o banco diretamente. Toda leitura ou alteração passa pela API FastAPI.
+
+## 2. Stack tecnológica
+
+- **Coleta:** Python e `requests`, consumindo o endpoint REST da FINEP.
+- **IA:** Google Gemini por meio do pacote `google-genai`, com resposta estruturada validada por Pydantic.
+- **Backend:** FastAPI executado por Uvicorn.
+- **Banco:** PostgreSQL, acessado pelo backend e pelo scraper por meio da variável de ambiente de conexão.
+- **Frontend:** React em uma SPA empacotada pelo Vite.
+- **Estilização:** Tailwind CSS e CSS da aplicação.
+
+## 3. Organização do projeto
+
 ```text
 Buscador-de-Editais/
-├── .gitignore                   
 ├── backend/
-│   ├── .env                     # Chaves de API (ex: GEMINI_API_KEY)
-│   ├── database.py              # Inicialização e migração do SQLite (schema centralizado)
-│   ├── scraper_ai.py            # Script de ingestão, filtro de palavras-chave e IA
-│   ├── main.py                  # API REST FastAPI (endpoints de oportunidades e CRUD de temas)
-│   ├── oportunidades.db         # Banco de dados SQLite local (tabelas: oportunidades, temas)
-│   ├── requirements.txt         # Dependências do backend Python
-│   └── venv/                    # Ambiente virtual Python
+│   ├── database.py              # Conexão e inicialização do PostgreSQL
+│   ├── scraper_ai.py            # Coleta, filtro, IA e persistência
+│   ├── main.py                  # API REST e CRUD de temas
+│   └── requirements.txt         # Dependências Python
 ├── doc/
 │   ├── 01_Visao_Geral_PoC.md
 │   ├── 02_Arquitetura_Sistema.md
 │   └── 03_Fluxo_de_Dados.md
 └── frontend/
-    ├── package.json             
-    ├── tailwind.config.js       
-    ├── postcss.config.js        
-    ├── index.html               
+    ├── package.json
     ├── vite.config.js
     └── src/
-        ├── App.jsx              # Interface principal com busca, filtros e acionador do modal
-        ├── components/
-        │   └── GerenciadorTemas.jsx # Modal interativo com CRUD completo de temas/palavras-chave
-        ├── App.css
-        └── index.css            
+        ├── App.jsx
+        └── components/
+            └── GerenciadorTemas.jsx
 ```
 
-## 3. Decisões Arquiteturais e Boas Práticas
+Arquivos `.env` são usados apenas no ambiente de execução e não devem ser versionados.
 
-*   **Separação entre Ingestão (Batch) e API (Serving):**
-    *   `scraper_ai.py` funciona como um processo de coleta e processamento em lote (*batch*), executado sob demanda ou agendamento via terminal (`python scraper_ai.py`).
-    *   `main.py` serve as oportunidades (`GET /oportunidades`) e gerencia o ciclo de vida dos temas via CRUD REST (`GET`, `POST`, `PUT`, `DELETE /temas`).
-*   **Filtro Lexical Pré-IA:**
-    *   Antes de submeter itens brutos ao Gemini, o coletor confronta os campos do edital contra a base ativa de temas/palavras-chave no SQLite. Itens sem aderência lexical são descartados imediatamente, reduzindo chamadas desnecessárias à API de IA.
-*   **Deduplicação em Duas Camadas:**
-    1.  *Camada de Negócio / Aplicação:* Verificação prévia no SQLite do link estimado da chamada antes de acionar a IA, economizando 100% dos tokens de chamadas repetidas.
-    2.  *Camada de Persistência:* Restrição `link TEXT UNIQUE` e uso de `INSERT OR IGNORE` para integridade transacional contra concorrência ou links equivalentes.
-*   **Resiliência Contra Erros 404 (Proxy de Busca Google):**
-    *   Como links diretos de portais governamentais sofrem constantes refatorações e retornos 404, o coletor utiliza `urllib.parse.quote` no título do edital e gera uma URL pública de busca direcionada: `https://www.google.com/search?q=site:finep.gov.br+{titulo_codificado}`.
-*   **Retenção Integral de Conteúdo (`descricaoRawText`):**
-    *   O texto completo da chamada é persistido na íntegra no SQLite e servido via API REST. O frontend em React disponibiliza a leitura interna desse conteúdo em modal dedicado, eliminando a dependência de disponibilidade imediata do portal de origem.
-*   **Ambiente e Protocolo de Execução Local:**
-    *   O Uvicorn executa em **HTTP puro** (`http://127.0.0.1:8000`). Não há certificado SSL configurado localmente; portanto, tentativas de acesso com `https://` resultarão em falha de conexão (`ERR_SSL_PROTOCOL_ERROR`).
-    *   A documentação interativa da API está disponível via Swagger UI em `http://127.0.0.1:8000/docs`.
-*   **CORS (Cross-Origin Resource Sharing):** Habilitado no FastAPI com `allow_origins=["*"]` para permitir que o Vite (`http://localhost:5173`) consuma a API sem bloqueios no navegador.
+## 4. Responsabilidades
 
----
-*Nota para IAs auxiliares: Ao sugerir códigos, respeite a stack atual. Mantenha a simplicidade da PoC, priorizando o SQLite e evitando ORMs pesados.*
+### Scraper
+
+`scraper_ai.py` é um processo batch independente da API. Ele consulta a FINEP, descarta itens irrelevantes, solicita a análise do Gemini para os itens aderentes e grava os resultados no PostgreSQL.
+
+### API
+
+`main.py` fornece:
+
+- `GET /oportunidades`
+- `GET /temas`
+- `POST /temas`
+- `PUT /temas/{tema_id}`
+- `DELETE /temas/{tema_id}`
+- `GET /health`, quando habilitado no ambiente publicado
+
+### Frontend
+
+`App.jsx` consulta oportunidades e temas e aplica busca e filtros no navegador. `GerenciadorTemas.jsx` executa o CRUD de temas pela API.
+
+## 5. Decisões arquiteturais
+
+- **Batch separado da API:** o scraper não precisa permanecer rodando para que o painel funcione.
+- **PostgreSQL compartilhado:** API e scraper consultam a mesma fonte persistente.
+- **Filtro antes da IA:** reduz chamadas ao Gemini e evita processar itens sem aderência temática.
+- **Deduplicação em duas camadas:** a aplicação verifica registros existentes e o banco mantém unicidade no link.
+- **Retenção do texto bruto:** permite consultar o conteúdo armazenado mesmo que a página original seja alterada ou removida.
+- **Configuração por ambiente:** URLs, credenciais e chaves não ficam no código.
+- **CORS restrito:** a API deve aceitar a origem publicada do frontend e, quando necessário, a origem local de desenvolvimento.
+
+## 6. Evoluções futuras
+
+- Agendamento automático do scraper.
+- Integração com novas fontes.
+- Autenticação e autorização.
+- Notificações por e-mail ou Teams.
+- Observabilidade, auditoria e métricas de execução.

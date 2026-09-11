@@ -1,66 +1,85 @@
 # Visão Geral do Projeto
-**Nome do Projeto:** Buscador Automatizado de Oportunidades para Inovação
-**Fase Atual:** Prova de Conceito (PoC)
-**Setor:** Inovação - Companhia de Metrô
+
+**Nome:** Buscador Automatizado de Oportunidades para Inovação
+**Fase:** Prova de Conceito (PoC)
+**Área:** Inovação - Companhia de Metrô
 
 ## 1. Objetivo
-Desenvolver uma ferramenta automatizada capaz de prospectar editais, financiamentos, eventos e parcerias em fontes governamentais e de fomento. A solução utiliza Inteligência Artificial generativa para interpretar dados brutos de chamadas públicas, classificar o nível de aderência aos interesses estratégicos da companhia e disponibilizar essas oportunidades em um painel interativo.
 
-*   **Fontes na PoC:**
-    *   **FINEP (Ativa):** Coleta via endpoint REST público de chamadas abertas/recentes.
-    *   **FAPESP e SENAI (Backlog/Próximos Passos):** Mapeadas para expansão futura após validação da PoC.
+O projeto identifica editais, financiamentos, eventos e parcerias relevantes para inovação. A solução:
 
-## 2. Natureza de "Prova de Conceito" (PoC)
-Este projeto foi desenhado estritamente como uma PoC local. O foco é **validar a viabilidade técnica** (se a IA consegue extrair e classificar os dados corretamente) e **gerar valor imediato** para os usuários do setor.
-*   **Restrições Atuais:** Execução apenas em máquina local (`localhost`), protocolo HTTP simples (sem TLS/HTTPS), sem infraestrutura em nuvem, sem CI/CD ou DevOps complexo no momento.
-*   **Próximos Passos (Pós-PoC):** Migração para ambiente corporativo (ex: Google Cloud / Vertex AI), orquestração periódica de coleta (Airflow/Cloud Functions), implementação de webhooks/notificações (email/Teams), e raspagem em larga escala.
+1. consulta a API pública da FINEP;
+2. filtra oportunidades por data, situação e temas de interesse;
+3. utiliza o Google Gemini para estruturar e classificar os itens aderentes;
+4. armazena os resultados em PostgreSQL;
+5. disponibiliza os dados em uma API FastAPI consumida pelo painel React.
 
-## 3. Temas de Interesse e Palavras-chave Dinâmicas
-Diferente de listas estáticas no código, os temas estratégicos agora são **armazenados e gerenciados dinamicamente no banco de dados SQLite** (tabela `temas`) através de um CRUD no painel React. 
-Eles desempenham duplo papel no ciclo de vida da informação:
-1. **Filtro de Palavras-Chave:** O coletor analisa os campos brutos do edital antes de qualquer chamada externa. Caso nenhuma das palavras-chave ativas seja identificada, o conteúdo é descartado de imediato, economizando custos e tempo.
-2. **Critérios de Aderência para IA:** Havendo correspondência, os temas ativos são injetados dinamicamente no prompt do Google Gemini para avaliar o nível de alinhamento (`Alto`, `Médio` ou `Baixo`).
+Na PoC, a FINEP é a fonte ativa. FAPESP, SENAI e outras fontes permanecem como possibilidades futuras.
 
-A base é inicializada automaticamente (*seed*) com os seguintes temas estratégicos de referência:
-*   Mobilidade urbana e transporte sobre trilhos
-*   MaaS (Mobility as a Service)
-*   Hidrogênio verde e Energias renováveis
-*   Blockchain e Materiais avançados
-*   Indústria 4.0 e Inteligência Artificial
+## 2. Componentes
 
-## 4. Estrutura de Dados e Integridade
-O sistema gerencia duas tabelas relacionais locais no SQLite:
+| Componente | Responsabilidade |
+|---|---|
+| `backend/scraper_ai.py` | Executa a coleta e o processamento em lote pelo terminal |
+| `backend/database.py` | Centraliza conexão e inicialização do PostgreSQL |
+| `backend/main.py` | Expõe a API REST e o CRUD de temas |
+| `frontend/` | Exibe oportunidades e permite gerenciar temas |
+| PostgreSQL hospedado | Persiste oportunidades e temas |
 
-### Tabela `oportunidades`
-Armazena as oportunidades validadas e classificadas pela IA:
+O scraper continua sendo executado manualmente. Ele e a API utilizam o mesmo banco PostgreSQL hospedado, permitindo que os dados inseridos pelo terminal apareçam na interface publicada.
 
-| Campo | Tipo / Regra | Descrição |
-| :--- | :--- | :--- |
-| `titulo` | `TEXT NOT NULL` | Título do edital ou chamada pública |
-| `instituicao` | `TEXT` | Órgão responsável (ex: FINEP) |
-| `categoria` | `TEXT` | Classificação estrita: `Edital`, `Evento`, `Curso` ou `Parceria` |
-| `resumo` | `TEXT` | Síntese concisa de no máximo 3 linhas sobre a oportunidade |
-| `tematica` | `TEXT` | Tema principal identificado na chamada |
-| `prazo` | `TEXT` | Prazo limite de submissão (ou "Não informado") |
-| `aderencia` | `TEXT` | Nível de alinhamento com os temas do Metrô: `Alto`, `Médio` ou `Baixo` |
-| `link` | `TEXT UNIQUE` | URL de acesso gerada via proxy de busca Google (`https://www.google.com/search?q=site:finep.gov.br+{titulo}`) para evitar 404 |
-| `data_coleta` | `TIMESTAMP` | Registro temporal gerado automaticamente pelo banco para ordenação |
-| `descricaoRawText` | `TEXT` | Texto bruto original retido na íntegra para consulta interna sem dependência externa |
+## 3. Temas e palavras-chave
 
-### Tabela `temas`
-Armazena os temas e palavras-chave gerenciáveis pelo usuário via CRUD:
+Os temas são armazenados na tabela `temas` e podem ser administrados pelo painel React. Eles possuem duas funções:
 
-| Campo | Tipo / Regra | Descrição |
-| :--- | :--- | :--- |
-| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Identificador único do tema |
-| `nome` | `TEXT NOT NULL UNIQUE` | Nome ou palavra-chave de interesse estratégico |
-| `data_criacao` | `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` | Data e hora de inclusão do tema |
+1. filtrar o conteúdo retornado pela FINEP antes da chamada ao Gemini;
+2. orientar a classificação de aderência feita pela IA.
 
-### Política de Deduplicação e Economia de Tokens
-Para otimizar custos de consumo de API de IA e evitar redundâncias:
-1. **Deduplicação Pré-IA:** O sistema verifica se o edital já existe no banco antes de solicitar o processamento semântico à IA.
-2. **Pré-filtro de Palavras-Chave:** Descarta chamadas que não guardam correspondência lexical com nenhum tema ativo no banco.
-3. **Deduplicação no Banco:** O campo `link` possui restrição `UNIQUE` e as inserções utilizam `INSERT OR IGNORE` como garantia de integridade transacional.
+Quando a tabela é inicializada sem registros, são cadastrados estes temas de referência:
 
----
-*Nota para IAs auxiliares: Este documento define o escopo de negócios. Limite as sugestões de novas features àquelas que respeitem as restrições da PoC.*
+- Mobilidade urbana e transporte sobre trilhos
+- MaaS (Mobility as a Service)
+- Hidrogênio verde e Energias renováveis
+- Blockchain e Materiais avançados
+- Indústria 4.0 e Inteligência Artificial
+
+## 4. Dados persistidos
+
+### `oportunidades`
+
+| Campo | Descrição |
+|---|---|
+| `id` | Identificador da oportunidade |
+| `titulo` | Título do edital ou chamada |
+| `instituicao` | Órgão responsável |
+| `categoria` | `Edital`, `Evento`, `Curso` ou `Parceria` |
+| `resumo` | Resumo de até três linhas |
+| `tematica` | Tema principal identificado |
+| `prazo` | Prazo limite ou `Não informado` |
+| `aderencia` | `Alto`, `Médio` ou `Baixo` |
+| `link` | Link público da oportunidade, com unicidade |
+| `data_coleta` | Data de inserção ou atualização |
+| `descricaoRawText` | Texto bruto retido para consulta interna |
+
+### `temas`
+
+| Campo | Descrição |
+|---|---|
+| `id` | Identificador do tema |
+| `nome` | Tema ou palavra-chave, com unicidade |
+| `data_criacao` | Data de criação |
+
+## 5. Regras principais
+
+- Itens antigos ou encerrados são descartados antes do processamento com IA.
+- Itens sem correspondência com os temas ativos não são enviados ao Gemini.
+- O link e o título são usados na deduplicação.
+- O texto bruto é mantido para que a interface não dependa da disponibilidade futura da página de origem.
+- A unicidade do link no PostgreSQL protege a integridade dos dados.
+
+## 6. Limites atuais da PoC
+
+- A coleta continua sob demanda, pelo terminal.
+- Apenas a FINEP está integrada.
+- Não há autenticação de usuários ou controle de permissões.
+- O envio de notificações e a execução automática periódica ficam para uma etapa futura.
