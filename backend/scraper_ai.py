@@ -273,9 +273,8 @@ if __name__ == "__main__":
             try:
                 titulo_preview = (item.get('titulo') or 'Item sem título').strip()
                 
-                # 1. Montagem dinâmica da URL pública via proxy seguro de busca do Google (evita erros 404)
-                titulo_codificado = urllib.parse.quote(titulo_preview)
-                url_publica = f"https://www.google.com/search?q=site:finep.gov.br+{titulo_codificado}"
+                item_id = item.get('id', '')
+                url_publica = f"https://www.finep.gov.br/e/chamada-publica/222684/{item_id}"
 
                 # 2. Filtro Temporal: Ignora editais muito antigos (economiza tokens e processamento)
                 eh_antigo, motivo_antigo = edital_eh_muito_antigo(item)

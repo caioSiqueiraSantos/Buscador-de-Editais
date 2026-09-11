@@ -81,11 +81,17 @@ function App() {
         {/* Header - Metro Style Signage */}
         <header className="mb-10 border-b-2 border-slate-800 pb-8 flex flex-col lg:flex-row lg:items-end justify-between gap-6">
           <div>
-            <div className="flex items-center gap-3 mb-2">
+            <div className="flex items-center gap-3 mb-2 flex-wrap">
               <img src={logo} alt="Logo NIT" className="h-12 w-auto" />
               <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-white">
                 Eventos de Inovação
               </h1>
+              {!loading && (
+                <span className="inline-flex items-center gap-1.5 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold px-3 py-1 rounded-full shadow-sm">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                  {filtradas.length} {filtradas.length === 1 ? 'evento visível' : 'eventos visíveis'}
+                </span>
+              )}
             </div>
             <p className="text-slate-400 text-lg md:ml-15 font-medium tracking-wide">
               Buscador Automatizado • Oportunidades em exibição
@@ -150,6 +156,19 @@ function App() {
         {/* Content - Grid of Cards */}
         {!loading && (
           <div>
+            <div className="flex items-center justify-between mb-6 px-1">
+              <div className="flex items-center gap-2 text-sm text-slate-400 font-medium">
+                <span>Eventos encontrados:</span>
+                <span className="text-cyan-300 font-bold bg-slate-900 border border-slate-700 px-2.5 py-0.5 rounded-full text-xs">
+                  {filtradas.length}
+                </span>
+                {oportunidades.length > 0 && filtradas.length !== oportunidades.length && (
+                  <span className="text-slate-500 text-xs">
+                    (de {oportunidades.length} total)
+                  </span>
+                )}
+              </div>
+            </div>
             {filtradas.length === 0 ? (
               <div className="py-16 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800 border-dashed">
                 Nenhuma oportunidade encontrada com os filtros atuais.
