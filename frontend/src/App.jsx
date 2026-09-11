@@ -2,11 +2,73 @@ import { useEffect, useState, useMemo } from 'react'
 import logo from './assets/NIT Logo.png';
 import GerenciadorTemas from './components/GerenciadorTemas';
 
+// Formatação determinística de datas para dd/mm/aaaa (Zero Alucinação)
+const formatarDataBR = (dataRaw) => {
+  if (!dataRaw || typeof dataRaw !== 'string') return dataRaw || 'Não informado'
+  const texto = dataRaw.trim()
+  if (!texto || texto.toLowerCase() === 'não informado' || texto.toLowerCase() === 'n/a') {
+    return 'Não informado'
+  }
+
+  // 1. Já está no formato dd/mm/aaaa
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(texto)) {
+    return texto
+  }
+
+  // 2. Formato ISO ou YYYY-MM-DD (ex: "2026-06-08T17:00:00.000Z", "2026-09-18", "2026/09/18")
+  const matchIso = texto.match(/^(\d{4})[-/](\d{2})[-/](\d{2})/)
+  if (matchIso) {
+    const [, ano, mes, dia] = matchIso
+    return `${dia}/${mes}/${ano}`
+  }
+
+  // 3. Formato DD-MM-YYYY
+  const matchDmyHifen = texto.match(/^(\d{2})-(\d{2})-(\d{4})/)
+  if (matchDmyHifen) {
+    const [, dia, mes, ano] = matchDmyHifen
+    return `${dia}/${mes}/${ano}`
+  }
+
+  // 4. Data por extenso em português: "16 de setembro de 2026", "1º de setembro de 2026"
+  const mesesMap = {
+    janeiro: '01', fevereiro: '02', marco: '03', março: '03',
+    abril: '04', maio: '05', junho: '06', julho: '07',
+    agosto: '08', setembro: '09', outubro: '10', novembro: '11', dezembro: '12',
+    jan: '01', fev: '02', mar: '03', abr: '04', mai: '05', jun: '06',
+    jul: '07', ago: '08', set: '09', out: '10', nov: '11', dez: '12'
+  }
+
+  const matchExtenso = texto.toLowerCase().match(/(\d{1,2})(?:º|o)?\s+de\s+([a-zç]+)\s+de\s+(\d{4})/)
+  if (matchExtenso) {
+    const dia = matchExtenso[1].padStart(2, '0')
+    const nomeMes = matchExtenso[2].normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    const mes = mesesMap[nomeMes]
+    const ano = matchExtenso[3]
+    if (mes) {
+      return `${dia}/${mes}/${ano}`
+    }
+  }
+
+  // 5. Data embutida no texto (ex: "Submissão até 2026-09-18" ou "Até 14/08/2026")
+  const matchDataEmbutidaIso = texto.match(/(\d{4})[-/](\d{2})[-/](\d{2})/)
+  if (matchDataEmbutidaIso) {
+    const [, ano, mes, dia] = matchDataEmbutidaIso
+    return `${dia}/${mes}/${ano}`
+  }
+  const matchDataEmbutidaBr = texto.match(/(\d{2})\/(\d{2})\/(\d{4})/)
+  if (matchDataEmbutidaBr) {
+    return matchDataEmbutidaBr[0]
+  }
+
+  return texto
+}
+
 function App() {
   const [oportunidades, setOportunidades] = useState([])
   const [busca, setBusca] = useState("")
   const [filtroTema, setFiltroTema] = useState("")
   const [filtroPrazo, setFiltroPrazo] = useState("")
+  const [filtroAderencia, setFiltroAderencia] = useState("")
   const [loading, setLoading] = useState(true)
   const [temasBanco, setTemasBanco] = useState([])
   const [isModalTemasOpen, setIsModalTemasOpen] = useState(false)
@@ -16,7 +78,13 @@ function App() {
     fetch('http://localhost:8000/oportunidades')
       .then(response => response.json())
       .then(data => {
-        setOportunidades(data)
+        const dadosNormalizados = Array.isArray(data)
+          ? data.map(op => ({
+            ...op,
+            prazo: formatarDataBR(op.prazo)
+          }))
+          : []
+        setOportunidades(dadosNormalizados)
         setLoading(false)
       })
       .catch(error => {
@@ -46,7 +114,16 @@ function App() {
 
   const prazosUnicos = useMemo(() => {
     const prazos = oportunidades.map(op => op.prazo).filter(Boolean)
-    return [...new Set(prazos)].sort()
+    return [...new Set(prazos)].sort((a, b) => {
+      const matchA = a.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+      const matchB = b.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+      if (matchA && matchB) {
+        const valA = `${matchA[3]}${matchA[2]}${matchA[1]}`
+        const valB = `${matchB[3]}${matchB[2]}${matchB[1]}`
+        return valA.localeCompare(valB)
+      }
+      return a.localeCompare(b)
+    })
   }, [oportunidades])
 
   const filtradas = oportunidades.filter(op => {
@@ -54,8 +131,12 @@ function App() {
       op.instituicao?.toLowerCase().includes(busca.toLowerCase())
     const matchTema = filtroTema ? (op.tematica === filtroTema || op.tematica?.toLowerCase().includes(filtroTema.toLowerCase())) : true
     const matchPrazo = filtroPrazo ? op.prazo === filtroPrazo : true
+    const matchAderencia = filtroAderencia
+      ? (op.aderencia?.toLowerCase() === filtroAderencia.toLowerCase() ||
+        (filtroAderencia === 'Médio' && op.aderencia?.toLowerCase() === 'medio'))
+      : true
 
-    return matchBusca && matchTema && matchPrazo
+    return matchBusca && matchTema && matchPrazo && matchAderencia
   })
 
   const aderenciaColor = (nivel) => {
@@ -81,20 +162,28 @@ function App() {
         {/* Header - Metro Style Signage */}
         <header className="mb-10 border-b-2 border-slate-800 pb-8 flex flex-col lg:flex-row lg:items-end justify-between gap-6">
           <div>
-            <div className="flex items-center gap-3 mb-2 flex-wrap">
-              <img src={logo} alt="Logo NIT" className="h-12 w-auto" />
+            <div className="flex items-center gap-3 mb-2">
+              <img src={logo} alt="Logo NIT" className="h-12 w-auto shrink-0" />
               <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-white">
-                Eventos de Inovação
+                Inovação
               </h1>
-              {!loading && (
-                <span className="inline-flex items-center gap-1.5 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold px-3 py-1 rounded-full shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
-                  {filtradas.length} {filtradas.length === 1 ? 'evento visível' : 'eventos visíveis'}
-                </span>
-              )}
             </div>
-            <p className="text-slate-400 text-lg md:ml-15 font-medium tracking-wide">
-              Buscador Automatizado • Oportunidades em exibição
+            <p className="text-slate-400 text-lg md:ml-15 font-medium tracking-wide flex items-center gap-2 flex-wrap">
+              <span>Buscador Automatizado</span>
+              <span>•</span>
+              {!loading ? (
+                <span className="text-cyan-400 font-semibold inline-flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0"></span>
+                  {filtradas.length} {filtradas.length === 1 ? 'oportunidade encontrada' : 'oportunidades encontradas'}
+                  {oportunidades.length > 0 && filtradas.length !== oportunidades.length && (
+                    <span className="text-slate-500 font-normal text-sm">
+                      (de {oportunidades.length} total)
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="text-slate-500">Carregando...</span>
+              )}
             </p>
           </div>
 
@@ -139,6 +228,16 @@ function App() {
                 <option value="">Todos os Prazos</option>
                 {prazosUnicos.map((prazo, i) => <option key={i} value={prazo}>{prazo}</option>)}
               </select>
+              <select
+                className="bg-slate-900 border border-slate-700 rounded-full py-2.5 px-4 text-sm text-slate-300 focus:outline-none focus:border-cyan-500 flex-1 appearance-none cursor-pointer"
+                value={filtroAderencia}
+                onChange={(e) => setFiltroAderencia(e.target.value)}
+              >
+                <option value="">Todas as Aderências</option>
+                <option value="Alto">Aderência Alta</option>
+                <option value="Médio">Aderência Média</option>
+                <option value="Baixo">Aderência Baixa</option>
+              </select>
             </div>
           </div>
         </header>
@@ -156,19 +255,6 @@ function App() {
         {/* Content - Grid of Cards */}
         {!loading && (
           <div>
-            <div className="flex items-center justify-between mb-6 px-1">
-              <div className="flex items-center gap-2 text-sm text-slate-400 font-medium">
-                <span>Eventos encontrados:</span>
-                <span className="text-cyan-300 font-bold bg-slate-900 border border-slate-700 px-2.5 py-0.5 rounded-full text-xs">
-                  {filtradas.length}
-                </span>
-                {oportunidades.length > 0 && filtradas.length !== oportunidades.length && (
-                  <span className="text-slate-500 text-xs">
-                    (de {oportunidades.length} total)
-                  </span>
-                )}
-              </div>
-            </div>
             {filtradas.length === 0 ? (
               <div className="py-16 text-center text-slate-400 font-medium bg-slate-900/40 rounded-3xl border border-slate-800 border-dashed">
                 Nenhuma oportunidade encontrada com os filtros atuais.
@@ -237,7 +323,7 @@ function App() {
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold px-3 py-2.5 rounded-xl transition-all text-xs hover:shadow-[0_0_12px_rgba(6,182,212,0.2)]"
-                            title="Buscar edital no portal da FINEP via proxy seguro de busca do Google"
+                            title="Buscar edital no portal da FINEP"
                           >
                             <span>FINEP (Busca)</span>
                             <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -322,7 +408,7 @@ function App() {
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    Texto Completo Retido (Evita 404)
+                    Texto Completo Retido
                   </h3>
                   <span className="text-[11px] text-slate-500 font-mono">
                     {editalSelecionado.descricaoRawText ? `${editalSelecionado.descricaoRawText.length} caracteres` : 'Sem texto bruto'}
@@ -337,7 +423,7 @@ function App() {
             {/* Footer do Modal */}
             <div className="p-4 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between gap-4">
               <span className="text-xs text-slate-500 hidden sm:inline">
-                Fonte: FINEP • Link via Proxy de Busca Google
+                Fonte: FINEP
               </span>
               <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
                 <button
