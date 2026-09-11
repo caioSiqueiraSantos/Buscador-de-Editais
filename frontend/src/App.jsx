@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import logo from './assets/NIT Logo.png';
 import GerenciadorTemas from './components/GerenciadorTemas';
+import { API_URL } from './config';
 
 // Formatação determinística de datas para dd/mm/aaaa (Zero Alucinação)
 const formatarDataBR = (dataRaw) => {
@@ -75,7 +76,7 @@ function App() {
   const [editalSelecionado, setEditalSelecionado] = useState(null)
 
   const carregarOportunidades = () => {
-    fetch('http://localhost:8000/oportunidades')
+    fetch(`${API_URL}/oportunidades`)
       .then(response => response.json())
       .then(data => {
         const dadosNormalizados = Array.isArray(data)
@@ -94,7 +95,7 @@ function App() {
   }
 
   const carregarTemasBanco = () => {
-    fetch('http://localhost:8000/temas')
+    fetch(`${API_URL}/temas`)
       .then(response => response.json())
       .then(data => setTemasBanco(data))
       .catch(error => console.error("Erro ao buscar temas:", error))

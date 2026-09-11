@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-import sqlite3
+import psycopg
 import requests
 import urllib.parse
 from typing import Optional
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 import unicodedata
 import re
 
-from database import init_db, obter_temas_db
+from database import init_db, obter_temas_db, get_db_url
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -94,22 +94,22 @@ def contem_palavra_chave(item_json: dict, temas: list[str]) -> tuple[bool, str]:
     return False, ""
 
 def oportunidade_ja_existe(link: str, titulo: str = "") -> bool:
-    """Verifica no SQLite se uma oportunidade já foi cadastrada e já possui descricaoRawText retido na íntegra."""
+    """Verifica no PostgreSQL se uma oportunidade já foi cadastrada e já possui descricaoRawText retido na íntegra."""
     if not link and not titulo:
         return False
-    conn = sqlite3.connect('oportunidades.db')
+    conn = psycopg.connect(get_db_url())
     cursor = conn.cursor()
     if titulo:
         cursor.execute('''
             SELECT 1 FROM oportunidades 
-            WHERE (link = ? OR titulo = ?) 
+            WHERE (link = %s OR titulo = %s) 
               AND descricaoRawText IS NOT NULL 
               AND descricaoRawText != ''
         ''', (link, titulo))
     else:
         cursor.execute('''
             SELECT 1 FROM oportunidades 
-            WHERE link = ? 
+            WHERE link = %s 
               AND descricaoRawText IS NOT NULL 
               AND descricaoRawText != ''
         ''', (link,))
@@ -214,21 +214,21 @@ def analisar_com_ia(bloco_enriquecido: dict, url_publica: str, temas_lista: list
 analisar_item_com_ia = analisar_com_ia
 
 def salvar_no_banco(oportunidade: Oportunidade):
-    conn = sqlite3.connect('oportunidades.db')
+    conn = psycopg.connect(get_db_url())
     cursor = conn.cursor()
     
     texto_completo = oportunidade.descricaoRawText or ""
     
     try:
         # Verifica se já existe por link ou título para atualizar ou inserir
-        cursor.execute('SELECT id FROM oportunidades WHERE link = ? OR titulo = ?', (oportunidade.link, oportunidade.titulo))
+        cursor.execute('SELECT id FROM oportunidades WHERE link = %s OR titulo = %s', (oportunidade.link, oportunidade.titulo))
         existente = cursor.fetchone()
         
         if existente:
             cursor.execute('''
                 UPDATE oportunidades 
-                SET link = ?, descricaoRawText = ?, resumo = ?, prazo = ?, aderencia = ?
-                WHERE id = ?
+                SET link = %s, descricaoRawText = %s, resumo = %s, prazo = %s, aderencia = %s
+                WHERE id = %s
             ''', (
                 oportunidade.link, texto_completo,
                 oportunidade.resumo, oportunidade.prazo, oportunidade.aderencia, existente[0]
@@ -237,7 +237,7 @@ def salvar_no_banco(oportunidade: Oportunidade):
         else:
             cursor.execute('''
                 INSERT INTO oportunidades (titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, link, descricaoRawText)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
                 oportunidade.titulo, oportunidade.instituicao, oportunidade.categoria,
                 oportunidade.resumo, oportunidade.tematica, oportunidade.prazo,
@@ -254,7 +254,7 @@ def salvar_no_banco(oportunidade: Oportunidade):
 if __name__ == "__main__":
     init_db()
     
-    # Carregar temas dinâmicos do banco SQLite
+    # Carregar temas dinâmicos do banco PostgreSQL
     temas_ativos = obter_temas_db()
     print(f"📌 Temas/Palavras-chave ativas no banco ({len(temas_ativos)}):")
     for t in temas_ativos:
@@ -337,7 +337,7 @@ if __name__ == "__main__":
                     "url_publica": url_publica
                 }
 
-                # 7. Filtro prévio por palavras-chave / temas dinâmicos no SQLite
+                # 7. Filtro prévio por palavras-chave / temas dinâmicos no PostgreSQL
                 corresponde, tema_detectado = contem_palavra_chave(bloco_enriquecido, temas_ativos)
                 if not corresponde:
                     print(f"⏭️ Nenhuma palavra-chave encontrada no edital: '{titulo_preview[:45]}'. Ignorando conteúdo.")

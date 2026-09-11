@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { API_URL } from '../config'
 
 export default function GerenciadorTemas({ isOpen, onClose, onTemasAtualizados }) {
   const [temas, setTemas] = useState([])
@@ -19,7 +20,7 @@ export default function GerenciadorTemas({ isOpen, onClose, onTemasAtualizados }
     try {
       setLoading(true)
       setErro('')
-      const res = await fetch('http://localhost:8000/temas')
+      const res = await fetch(`${API_URL}/temas`)
       if (!res.ok) throw new Error('Falha ao obter lista de temas.')
       const data = await res.json()
       setTemas(data)
@@ -51,7 +52,7 @@ export default function GerenciadorTemas({ isOpen, onClose, onTemasAtualizados }
       setSalvando(true)
       setErro('')
       setSucesso('')
-      const res = await fetch('http://localhost:8000/temas', {
+      const res = await fetch(`${API_URL}/temas`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome: nomeLimpo })
@@ -83,7 +84,7 @@ export default function GerenciadorTemas({ isOpen, onClose, onTemasAtualizados }
       setSalvando(true)
       setErro('')
       setSucesso('')
-      const res = await fetch(`http://localhost:8000/temas/${id}`, {
+      const res = await fetch(`${API_URL}/temas/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome: nomeLimpo })
@@ -110,7 +111,7 @@ export default function GerenciadorTemas({ isOpen, onClose, onTemasAtualizados }
       setSalvando(true)
       setErro('')
       setSucesso('')
-      const res = await fetch(`http://localhost:8000/temas/${id}`, {
+      const res = await fetch(`${API_URL}/temas/${id}`, {
         method: 'DELETE'
       })
 
