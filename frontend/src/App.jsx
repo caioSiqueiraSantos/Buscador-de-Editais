@@ -524,13 +524,16 @@ function App() {
                               const isAtivo = nivelEfetivo?.toLowerCase() === nivel.toLowerCase() ||
                                 (nivel === 'Médio' && nivelEfetivo?.toLowerCase() === 'medio')
                               const btnColor = aderenciaColor(nivel)
+                              const isHumano = op.revisado_por_humano
                               return (
                                 <button
                                   key={nivel}
                                   onClick={() => handleCalibrarAderencia(op.id, nivel)}
                                   className={`py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer text-center ${isAtivo
-                                    ? `${btnColor.bg} text-slate-950 shadow-md ${btnColor.glow}`
-                                    : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
+                                    ? isHumano
+                                      ? `${btnColor.bg} text-slate-950 shadow-md ${btnColor.glow} border border-transparent`
+                                      : `border border-dashed ${btnColor.border} ${btnColor.text} bg-slate-900/50 opacity-60 hover:opacity-100`
+                                    : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent'
                                     }`}
                                 >
                                   {nivel}
@@ -670,18 +673,26 @@ function App() {
                 <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between flex-wrap gap-2">
                   <span className="text-xs text-slate-400 font-medium">Reclassificar aderência:</span>
                   <div className="flex gap-2">
-                    {['Alto', 'Médio', 'Baixo'].map((nivel) => (
-                      <button
-                        key={nivel}
-                        onClick={() => handleCalibrarAderencia(editalSelecionado.id, nivel)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${(editalSelecionado.aderencia_efetiva || '').toLowerCase() === nivel.toLowerCase()
-                          ? `${aderenciaColor(nivel).bg} text-slate-950 shadow-md`
-                          : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                          }`}
-                      >
-                        {nivel}
-                      </button>
-                    ))}
+                    {['Alto', 'Médio', 'Baixo'].map((nivel) => {
+                      const isAtivo = (editalSelecionado.aderencia_efetiva || '').toLowerCase() === nivel.toLowerCase() ||
+                        (nivel === 'Médio' && (editalSelecionado.aderencia_efetiva || '').toLowerCase() === 'medio')
+                      const btnColor = aderenciaColor(nivel)
+                      const isHumano = editalSelecionado.revisado_por_humano
+                      return (
+                        <button
+                          key={nivel}
+                          onClick={() => handleCalibrarAderencia(editalSelecionado.id, nivel)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${isAtivo
+                            ? isHumano
+                              ? `${btnColor.bg} text-slate-950 shadow-md border border-transparent`
+                              : `border border-dashed ${btnColor.border} ${btnColor.text} bg-slate-900/50 opacity-60 hover:opacity-100`
+                            : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent'
+                            }`}
+                        >
+                          {nivel}
+                        </button>
+                      )
+                    })}
                   </div>
                 </div>
               </div>

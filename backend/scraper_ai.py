@@ -23,18 +23,26 @@ from database import init_db, obter_temas_db, get_db_connection, obter_exemplos_
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# 1. Pydantic Schema estruturado para o Gemini
+# 1. Pydantic Schema estruturado para o Gemini com suporte a Recusa / Descarte
 class Oportunidade(BaseModel):
-    titulo: str = Field(description="O título do edital ou chamada")
-    instituicao: str = Field(description="Órgão responsável, ex: FINEP, FAPESP")
-    categoria: str = Field(description="Deve ser: Edital, Evento, Curso ou Parceria")
-    resumo: str = Field(description="Resumo de no máximo 3 linhas sobre o que se trata")
+    titulo: str = Field(description="O título do edital ou chamada pública")
+    instituicao: str = Field(description="Órgão responsável, ex: FINEP, FAPESP, CNPq")
+    categoria: str = Field(description="Deve ser estritamente: Edital, Evento, Curso ou Parceria")
+    resumo: str = Field(description="Resumo claro e objetivo de no máximo 3 linhas sobre o escopo do edital")
     tematica: str = Field(description="Tema principal do edital")
-    prazo: str = Field(description="Prazo limite. Use 'Não informado' se não achar")
-    aderencia: str = Field(description="Aderência aos temas do Metrô: Alto, Médio, Baixo")
-    justificativa_ia: Optional[str] = Field(default="", description="Justificativa concisa de 1 a 2 linhas explicando por que essa aderência foi atribuída com base nos temas e histórico de calibragem humana")
-    link: str = Field(description="Link para acesso à chamada")
+    prazo: str = Field(description="Prazo limite de submissão (formato data ou 'Não informado')")
+    aderencia: str = Field(description="Aderência estratégica aos temas do Metrô/NIT: Alto, Médio ou Baixo")
+    justificativa_ia: Optional[str] = Field(default="", description="Justificativa concisa de 1 a 2 linhas explicando a pontuação ou recusa")
+    link: str = Field(description="Link público para acesso à chamada")
     descricaoRawText: Optional[str] = Field(default="", description="Texto completo bruto da descrição do edital")
+    recusado: bool = Field(
+        default=False,
+        description="Defina estritamente como True se o edital for considerado extremamente divergente do foco do Metrô/NIT (ex.: agronegócio, pecuária, lavouras, commodities agrícolas/minerais, etc.) ou se não soar minimamente interessante/aplicável para a companhia. Defina False apenas se for aderente ou com potencial real de interesse para mobilidade, transporte, tecnologia ou mundo digital."
+    )
+    motivo_recusa: Optional[str] = Field(
+        default="",
+        description="Explicação concisa do motivo da recusa por divergência temática (preencher obrigatoriamente se recusado=True)."
+    )
 
 def normalizar_texto(texto: str) -> str:
     """Remove acentos e converte para minúsculas para comparação flexível."""
@@ -56,6 +64,93 @@ def extrair_valores_texto(item):
     elif isinstance(item, (str, int, float)):
         valores.append(str(item))
     return valores
+
+# ==================== CONSTANTES DE FILTRAGEM E SALVAGUARDAS ====================
+
+# Termos estritamente divergentes do foco do Metrô / NIT do Metrô
+TERMOS_RECUSA_DIVERGENCIA = [
+    # Agronegócio, Agroindústria e Agropecuária
+    'agronegocio', 'agropecuaria', 'agricola', 'agricultura familiar', 'lavoura', 'lavouras',
+    'safra', 'safras', 'soja', 'milho', 'cana de acucar', 'cana-de-acucar', 'cafeicultura',
+    'suinocultura', 'bovinocultura', 'avicultura', 'pecuaria', 'silagem',
+    'fertilizante', 'fertilizantes', 'defensivo agricola', 'defensivos agricolas', 'agrotoxico',
+    'pesticida', 'pesticidas', 'adubacao', 'adubo', 'trator agricola', 'tratores agricolas',
+    'colheitadeira', 'colheitadeiras', 'semeadora', 'implementos agricolas',
+    'piscicultura', 'aquicultura', 'pesca artesanal', 'veterinaria animal', 'manejo de pastagens',
+    'cultivo de graos', 'gado de corte', 'gado leiteiro',
+    'agroindustria', 'agroindustrial', 'agroindustriais', 'agro', 'bioeconomia e alimentos',
+    
+    # Commodities Brutas, Frete Pesado de Grãos e Mineração Extrativa
+    'commodities agricolas', 'graos agricolas', 'carreta de graos', 'transporte de soja',
+    'transporte rodoviario de cargas', 'mineracao de ferro', 'bauxita', 'extracao mineral bruta'
+]
+
+# Termos que garantem que o edital NÃO seja descartado no pré-filtro (salvaguarda de mobilidade/tecnologia)
+TERMOS_SALVAGUARDA_METRO = [
+    'metro', 'metropolitano', 'trem', 'trens', 'ferrovi', 'trilho', 'vlt', 'monotrilho',
+    'mobilidade urbana', 'transporte publico', 'bilhetag', 'bilhete unico', 'cbtc',
+    'material rodante', 'via permanente', 'passageiro', 'passageiros', 'maas',
+    'visao computacional', 'digital twin', 'gemeo digital', 'estacao de metro',
+    'ciberseguranca industrial', 'telecomunicacao ferroviaria'
+]
+
+def verificar_divergencia_sumaria(bloco_enriquecido: dict) -> Tuple[bool, str]:
+    """
+    Tier 1 - Heurística de Pré-Filtro (Zero Token Waste):
+    Detecta editais com divergência extrema e inequívoca (ex.: agronegócio puro, defensivos, colheita)
+    que não contenham nenhuma correlação com sistemas metroferroviários ou mobilidade.
+    """
+    todos_textos = f"{bloco_enriquecido.get('titulo', '')} {bloco_enriquecido.get('categorias', '')} {bloco_enriquecido.get('descricaoRawText', '')}"
+    texto_norm = normalizar_texto(todos_textos)
+    
+    # Se mencionar explicitamente modais ou tecnologias metroviárias, encaminha para análise da IA
+    for termo_salvo in TERMOS_SALVAGUARDA_METRO:
+        if termo_salvo in texto_norm:
+            return False, ""
+            
+    # Procura termos estritamente divergentes
+    for termo_div in TERMOS_RECUSA_DIVERGENCIA:
+        padrao = r'\b' + re.escape(termo_div) + r'\b'
+        if re.search(padrao, texto_norm):
+            return True, f"Foco temático em agronegócio/commodities agrícolas ('{termo_div}'), sem correlação com o ecossistema metroferroviário ou NIT."
+            
+    return False, ""
+
+def salvar_recusado_prefiltro(titulo: str, link: str, motivo: str, instituicao: str = "FINEP", resumo: str = "", raw_text: str = ""):
+    """Registra no banco um edital recusado sumariamente no pré-filtro para deduplicação e memória negativa."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id, status_revisao FROM oportunidades WHERE link = %s OR titulo = %s', (link, titulo))
+        existente = cursor.fetchone()
+        if existente:
+            op_id = existente['id'] if isinstance(existente, dict) else existente[0]
+            status_rev_antigo = existente.get('status_revisao') if isinstance(existente, dict) else existente[1]
+            if status_rev_antigo not in ['aprovado', 'ajustado']:
+                cursor.execute('''
+                    UPDATE oportunidades
+                    SET status_revisao = 'descartado', excluido = TRUE, aderencia = 'Baixo',
+                        motivo_feedback = %s, data_feedback = CURRENT_TIMESTAMP, descricaoRawText = %s
+                    WHERE id = %s
+                ''', (f"Recusado no Pré-Filtro: {motivo}", raw_text, op_id))
+        else:
+            cursor.execute('''
+                INSERT INTO oportunidades (
+                    titulo, instituicao, categoria, resumo, tematica, prazo,
+                    aderencia, justificativa_ia, link, descricaoRawText,
+                    status_revisao, excluido, motivo_feedback, data_feedback
+                ) VALUES (%s, %s, 'Edital', %s, 'Divergente / Não aderente', 'Não informado',
+                          'Baixo', %s, %s, %s, 'descartado', TRUE, %s, CURRENT_TIMESTAMP)
+            ''', (
+                titulo, instituicao, resumo or "Edital descartado no pré-filtro por divergência com o escopo do Metrô/NIT.",
+                f"Recusado sumariamente no pré-filtro por divergência temática: {motivo}", link, raw_text,
+                f"Recusado pela IA (Pré-Filtro): {motivo}"
+            ))
+        conn.commit()
+    except Exception as e:
+        print(f"Erro ao salvar recusa do pré-filtro: {e}")
+    finally:
+        conn.close()
 
 def contem_palavra_chave(item_json: dict, temas: list[str]) -> tuple[bool, str]:
     """
@@ -151,7 +246,7 @@ def montar_secao_memoria_aprendizado(positivos: list, negativos: list) -> str:
     """Formata os feedbacks humanos para serem injetados dinamicamente no prompt do Gemini."""
     linhas = []
     if not positivos and not negativos:
-        linhas.append("- Padrão Base: Dê prioridade a oportunidades voltadas a mobilidade urbana sobre trilhos, operação de metrô/trens, bilhetagem eletrônica, MaaS e infraestrutura sustentável de transporte público.")
+        linhas.append("- Padrão Base: Dê prioridade máxima a oportunidades voltadas a mobilidade urbana sobre trilhos, operação de metrô/trens, bilhetagem eletrônica, MaaS, tecnologias digitais (IA, IoT, Visão Computacional) e infraestrutura sustentável de transporte público.")
         return "\n".join(linhas)
 
     if positivos:
@@ -163,11 +258,11 @@ def montar_secao_memoria_aprendizado(positivos: list, negativos: list) -> str:
             linhas.append(f"• Edital: '{tit}' -> Aderência Humana: {ad} | Justificativa: {mot}")
 
     if negativos:
-        linhas.append("\n### EXEMPLOS DE EDITAIS DESCARTADOS PELO HUMANO COMO FALSOS POSITIVOS (NÃO PRIORIZAR SEMELHANTES):")
+        linhas.append("\n### EXEMPLOS DE EDITAIS DESCARTADOS PELO HUMANO COMO FALSOS POSITIVOS / FORA DE ESCOPO (RECUSAR SEMELHANTES):")
         for n in negativos:
             tit = n.get('titulo') or n['titulo']
             mot = n.get('motivo_feedback') or "Fora do escopo do Metrô"
-            linhas.append(f"• Edital Descartado: '{tit}' -> MOTIVO DO DESCARTE: {mot} (Atribua 'Baixo' ou desconsidere editais similares)")
+            linhas.append(f"• Edital Descartado: '{tit}' -> MOTIVO DO DESCARTE: {mot} (Obrigatório: Defina 'recusado': true e atribua 'Baixo')")
 
     return "\n".join(linhas)
 
@@ -178,32 +273,66 @@ def analisar_com_ia(
     exemplos_positivos: list = None,
     exemplos_negativos: list = None
 ) -> Oportunidade:
-    """Envia o bloco enriquecido de dados para o Gemini com Dynamic Few-Shot In-Context Learning."""
+    """Envia o bloco enriquecido para o Gemini com Dynamic Few-Shot e triagem de aderência ao Metrô/NIT."""
     temas_str = ", ".join(temas_lista) if temas_lista else "Mobilidade urbana, inovação tecnológica, transporte sobre trilhos"
     secao_memoria = montar_secao_memoria_aprendizado(exemplos_positivos or [], exemplos_negativos or [])
     
     prompt = f"""
-    Você é um analista sênior de inovação de uma companhia de Metrô (Companhia do Metropolitano).
-    Analise os dados do edital enriquecido e extraia as informações estruturadas com base nos preceitos básicos e na memória de aprendizado contínuo.
-    
-    Preceitos Fundamentais da Companhia:
-    - Foco Institucional: Mobilidade urbana sobre trilhos, operação metroferroviária, passageiros de alta capacidade, bilhetagem/MaaS, manutenção preventiva de vias e transição energética.
+    Você é um Engenheiro de Software e Analista de Inovação Sênior do NIT (Núcleo de Inovação Tecnológica) da Companhia do Metrô de São Paulo.
+    Sua missão é realizar a triagem técnica e estratégica de oportunidades de fomento e inovação aberta.
+
+    🎯 DIRETRIZ ESTRATÉGICA DE INTERESSE: FOCO NO METRÔ E NO NIT DO METRÔ
+    O Metrô de São Paulo opera transporte público metroferroviário de passageiros de alta capacidade em malha urbana densa.
+    O NIT (Núcleo de Inovação Tecnológica) busca tecnologias e inovações aplicáveis direta ou indiretamente ao ecossistema do Metrô.
+
+    ÁREAS DE ALTO INTERESSE E PRIORIDADE:
+    1. MOBILIDADE URBANA & TRANSPORTE:
+       - Transporte sobre trilhos: metrô, trens metropolitanos, VLT, monotrilho.
+       - Operação metroferroviária, automação de linhas (GoA4 / trens autônomos), sinalização e controle de trens (CBTC, ATO, ATP).
+       - Engenharia de material rodante, truques, via permanente, sistemas de tração, frenagem, portas de plataforma (PSD).
+       - Bilhetagem eletrônica/digital, bilhete único, validação NFC/QR Code, sistemas ABT (Account-Based Ticketing).
+       - MaaS (Mobility as a Service), intermodalidade (integração metrô + ônibus + micromobilidade), gestão e segurança de fluxo de passageiros, acessibilidade.
+    2. TECNOLOGIA & MUNDO DIGITAL (NIT):
+       - Inteligência Artificial, Aprendizado de Máquina, Visão Computacional aplicada (detecção de invasão de via, contagem e fluxo de passageiros, inspeção preventiva de ativos).
+       - Internet das Coisas (IoT), sensoriamento avançado, telemetria e manutenção preditiva de componentes críticos.
+       - Redes de telecomunicação críticas (5G privativo, rádio digital TETRA, redes ópticas), cibersegurança industrial (OT/SCADA) e de TI.
+       - Gêmeos Digitais (Digital Twins), modelagem BIM para infraestrutura metroviária, simulação de tráfego e evacuação em estações.
+       - Transformação digital corporativa, governança de dados, automação de processos e plataformas em nuvem.
+    3. ENERGIA & SUSTENTABILIDADE URBANA:
+       - Eletrificação, eficiência energética em tração elétrica e subestações retificadoras, recuperação de energia de frenagem regenerativa.
+       - Descarbonização, baterias e hidrogênio verde aplicados ao transporte urbano ou à operação de apoio.
+       - Novos materiais compósitos de alta durabilidade, redução de atrito roda-trilho, mitigação de ruído e vibração em áreas urbanas densas.
     - Temas de Interesse Cadastrados no Banco: {temas_str}.
+
+    ⛔ DIRETRIZ MANDATÓRIA DE RECUSA (DESCARTE IMEDIATO):
+    Se o edital for considerado extremamente divergente do foco do Metrô/NIT ou não soar minimamente interessante/aplicável para a companhia, VOCÊ DEVE RECUSÁ-LO (definir 'recusado': true e 'aderencia': 'Baixo').
+    NÃO se deixe enganar por palavras genéricas como 'tecnologia', 'inovação', 'descarbonização', 'veículos' ou 'transporte' se o objeto fim pertencer a áreas não correlatas.
     
+    Exemplos de temas EXTREMAMENTE DIVERGENTES que DEVEM SER RECUSADOS:
+    - Agronegócio, Agropecuária e Campo: cultivo de grãos, lavouras, safras, defensivos agrícolas, fertilizantes, adubos, irrigação rural, tratores, colheitadeiras, sementes.
+    - Commodities Agrícolas ou Minerais Brutas: soja, milho, cana-de-açúcar, café, gado, carne, celulose, mineração bruta de minério de ferro ou bauxita.
+    - Logística de Granéis / Frete Rodoviário de Cargas de Commodities: carretas bi-trem, rodotrens para escoamento de safras, barcaças fluviais exclusivas de grãos.
+    - Pecuária de corte/leite, suinocultura, avicultura, piscicultura, pesca e medicina veterinária animal.
+    - Saúde clínica geral, hospitais, novos medicamentos ou cirurgias sem conexão com a ergonomia/operação metroviária.
+    - Qualquer edital cujo objeto principal não tenha aplicabilidade prática, técnica ou científica para o Metrô ou o NIT.
+
     MEMÓRIA DE CALIBRAÇÃO HUMANA (Decisões reais da equipe técnica para orientar seu julgamento):
     {secao_memoria}
-    
-    Regras de Negócio e Classificação:
-    1. Aderência: Deve ser estritamente 'Alto', 'Médio' ou 'Baixo'.
-       - Atribua 'Alto' quando houver sinergia direta com metrô, trens, mobilidade de passageiros ou temas estratégicos similares aos exemplos positivos validados.
-       - Atribua 'Médio' para tecnologias com aplicação indireta (ex.: eficiência energética predial, ferramentas de software de gestão geral).
-       - Atribua 'Baixo' quando o edital tratar de modais não correlatos (ex.: frete rodoviário de soja, caminhões de agronegócio, navios de carga) mesmo que mencione palavras como 'transporte' ou 'veículos'.
-    2. Justificativa IA: Escreva de 1 a 2 linhas claras explicando a razão da nota atribuída, contrastando com os temas e o aprendizado humano.
-    3. Categoria: Deve ser estritamente: Edital, Evento, Curso ou Parceria.
-    4. Resumo: No máximo 3 linhas claras e objetivas.
-    5. Prazo: Extraia a data limite de submissão baseando-se no Prazo Proposto ({bloco_enriquecido.get('prazoProposto')}), Vigência Fim ({bloco_enriquecido.get('vigenciaFim')}) ou texto do edital. Use 'Não informado' se não identificar.
-    6. Link: Utilize a URL pública fornecida ({url_publica}).
-    
+
+    REGRAS DE CLASSIFICAÇÃO:
+    1. 'recusado': Booleano. Defina como TRUE se o edital divergir do foco do Metrô/NIT (agronegócio, commodities, pecuária, etc.) ou se não for interessante para a companhia. Defina como FALSE apenas se houver aplicabilidade real.
+    2. 'motivo_recusa': Se 'recusado' for true, descreva em 1 a 2 linhas a razão técnica da recusa por divergência temática. Se false, deixe em branco.
+    3. 'aderencia': Estritamente 'Alto', 'Médio' ou 'Baixo'.
+       - Se 'recusado' for true -> OBRIGATORIAMENTE atribua 'Baixo'.
+       - 'Alto': Sinergia direta com metrô, trens, mobilidade urbana, bilhetagem/MaaS ou tecnologias digitais prioritárias do NIT.
+       - 'Médio': Tecnologias transversais com aplicação indireta ao Metrô (ex.: softwares corporativos gerais, eficiência energética predial geral).
+       - 'Baixo': Pouca sinergia ou temas limítrofes.
+    4. 'justificativa_ia': Resumo analítico de 1 a 2 linhas fundamentando a decisão de aderência ou recusa.
+    5. 'categoria': Estritamente: Edital, Evento, Curso ou Parceria.
+    6. 'resumo': No máximo 3 linhas claras e objetivas.
+    7. 'prazo': Extraia a data limite de submissão baseando-se no Prazo Proposto ({bloco_enriquecido.get('prazoProposto')}), Vigência Fim ({bloco_enriquecido.get('vigenciaFim')}) ou texto do edital. Use 'Não informado' se não identificar.
+    8. 'link': Utilize a URL pública fornecida ({url_publica}).
+
     Bloco Enriquecido do Edital:
     Título: {bloco_enriquecido.get('titulo')}
     Descrição: {bloco_enriquecido.get('descricaoRawText')}
@@ -214,69 +343,121 @@ def analisar_com_ia(
     URL Pública: {url_publica}
     """
     
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Oportunidade,
-            temperature=0.1
-        ),
-    )
+    # Tentativa com o modelo primário e fallback resiliente
+    modelos_candidatos = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"]
+    response = None
+    ultimo_erro = None
+
+    for nome_modelo in modelos_candidatos:
+        try:
+            response = client.models.generate_content(
+                model=nome_modelo,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=Oportunidade,
+                    temperature=0.1
+                ),
+            )
+            break
+        except Exception as err:
+            ultimo_erro = err
+            print(f"⚠️ Modelo '{nome_modelo}' indisponível ou com sobrecarga ({err}). Tentando próximo modelo...")
+            continue
+
+    if response is None:
+        raise RuntimeError(f"Falha ao chamar a IA em todos os modelos candidatos. Último erro: {ultimo_erro}")
     
     oportunidade = Oportunidade.model_validate_json(response.text)
     oportunidade.link = url_publica
     oportunidade.descricaoRawText = bloco_enriquecido.get('descricaoRawText', '')
+    
+    # Validação de consistência: Se recusado pela IA, força aderência como Baixo
+    if oportunidade.recusado:
+        oportunidade.aderencia = "Baixo"
+        if not oportunidade.motivo_recusa:
+            oportunidade.motivo_recusa = oportunidade.justificativa_ia or "Recusado pela IA por divergência temática com o foco do Metrô/NIT."
+            
     return oportunidade
 
 # Alias para compatibilidade
 analisar_item_com_ia = analisar_com_ia
 
 def salvar_no_banco(oportunidade: Oportunidade):
+    """
+    Persiste o resultado da análise no banco de dados.
+    Se a oportunidade foi RECUSADA pela IA (divergência temática como agronegócio/commodities),
+    grava com 'excluido = TRUE' e 'status_revisao = descartado', mantendo o feed principal 100% limpo
+    e alimentando o dataset negativo de calibração ativa.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     
     texto_completo = oportunidade.descricaoRawText or ""
+    eh_recusado = bool(getattr(oportunidade, 'recusado', False))
+    motivo_recusa = getattr(oportunidade, 'motivo_recusa', '') or oportunidade.justificativa_ia or "Recusado pela IA por divergência temática com o foco do Metrô/NIT."
+    
+    aderencia_final = 'Baixo' if eh_recusado else oportunidade.aderencia
+    status_revisao = 'descartado' if eh_recusado else 'pendente'
+    motivo_feedback = f"Recusado pela IA: {motivo_recusa}" if eh_recusado else None
+    excluido = True if eh_recusado else False
     
     try:
         # Verifica se já existe por link ou título
-        cursor.execute('SELECT id, status_revisao, aderencia_humana FROM oportunidades WHERE link = %s OR titulo = %s', (oportunidade.link, oportunidade.titulo))
+        cursor.execute('SELECT id, status_revisao, aderencia_humana, excluido FROM oportunidades WHERE link = %s OR titulo = %s', (oportunidade.link, oportunidade.titulo))
         existente = cursor.fetchone()
         
         if existente:
-            # Preserva a soberania humana: se o usuário já revisou, não sobrescreve a aderência humana!
-            status_rev = existente.get('status_revisao') if isinstance(existente, dict) else existente[1]
-            if status_rev in ['aprovado', 'ajustado']:
+            op_id = existente['id'] if isinstance(existente, dict) else existente[0]
+            status_rev_antigo = existente.get('status_revisao') if isinstance(existente, dict) else existente[1]
+            
+            # Preserva soberania humana: se o usuário já revisou manualmente, não sobrescreve a decisão humana!
+            if status_rev_antigo in ['aprovado', 'ajustado']:
                 cursor.execute('''
                     UPDATE oportunidades 
                     SET link = %s, descricaoRawText = %s, resumo = %s, prazo = %s, justificativa_ia = %s
                     WHERE id = %s
                 ''', (
                     oportunidade.link, texto_completo,
-                    oportunidade.resumo, oportunidade.prazo, oportunidade.justificativa_ia, existente['id'] if isinstance(existente, dict) else existente[0]
+                    oportunidade.resumo, oportunidade.prazo, oportunidade.justificativa_ia, op_id
                 ))
                 print(f"🔄 Oportunidade atualizada preservando revisão humana: {oportunidade.titulo[:50]}...")
             else:
                 cursor.execute('''
                     UPDATE oportunidades 
-                    SET link = %s, descricaoRawText = %s, resumo = %s, prazo = %s, aderencia = %s, justificativa_ia = %s
+                    SET link = %s, descricaoRawText = %s, resumo = %s, prazo = %s, aderencia = %s, 
+                        justificativa_ia = %s, status_revisao = %s, excluido = %s, motivo_feedback = %s,
+                        data_feedback = CASE WHEN %s = TRUE THEN CURRENT_TIMESTAMP ELSE data_feedback END
                     WHERE id = %s
                 ''', (
                     oportunidade.link, texto_completo,
-                    oportunidade.resumo, oportunidade.prazo, oportunidade.aderencia, oportunidade.justificativa_ia, existente['id'] if isinstance(existente, dict) else existente[0]
+                    oportunidade.resumo, oportunidade.prazo, aderencia_final,
+                    oportunidade.justificativa_ia, status_revisao, excluido, motivo_feedback,
+                    excluido, op_id
                 ))
-                print(f"🔄 Oportunidade atualizada: {oportunidade.titulo[:50]}...")
+                if eh_recusado:
+                    print(f"🚫 [RECUSADO PELA IA] Oportunidade '{oportunidade.titulo[:50]}' atualizada como DESCARTADA (Divergência Temática).")
+                else:
+                    print(f"🔄 Oportunidade atualizada: {oportunidade.titulo[:50]}... (Aderência: {aderencia_final})")
         else:
             cursor.execute('''
                 INSERT INTO oportunidades (
-                    titulo, instituicao, categoria, resumo, tematica, prazo, aderencia, justificativa_ia, link, descricaoRawText
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    titulo, instituicao, categoria, resumo, tematica, prazo, 
+                    aderencia, justificativa_ia, link, descricaoRawText,
+                    status_revisao, excluido, motivo_feedback, data_feedback
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                          CASE WHEN %s = TRUE THEN CURRENT_TIMESTAMP ELSE NULL END)
             ''', (
                 oportunidade.titulo, oportunidade.instituicao, oportunidade.categoria,
                 oportunidade.resumo, oportunidade.tematica, oportunidade.prazo,
-                oportunidade.aderencia, oportunidade.justificativa_ia, oportunidade.link, texto_completo
+                aderencia_final, oportunidade.justificativa_ia, oportunidade.link, texto_completo,
+                status_revisao, excluido, motivo_feedback, excluido
             ))
-            print(f"✅ Nova oportunidade salva (Classificada com Memória de IA): {oportunidade.titulo[:50]}...")
+            if eh_recusado:
+                print(f"🚫 [RECUSADO PELA IA] Edital divergente registrado como DESCARTADO: {oportunidade.titulo[:50]}...")
+                print(f"   Motivo: {motivo_recusa}")
+            else:
+                print(f"✅ Nova oportunidade salva (Aderente ao Metrô/NIT): {oportunidade.titulo[:50]}... (Aderência: {aderencia_final})")
             
         conn.commit()
     except Exception as e:
@@ -284,12 +465,75 @@ def salvar_no_banco(oportunidade: Oportunidade):
     finally:
         conn.close()
 
+def expurgar_editais_divergentes_banco():
+    """
+    Higienização Retroativa de Escopo:
+    Varre o banco de dados e marca editais já existentes que sejam estritamente
+    divergentes (agronegócio, pecuária, commodities agrícolas) como descartados (excluido = TRUE),
+    limpando imediatamente o feed de oportunidades do Metrô/NIT.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT id, titulo, tematica, descricaoRawText, status_revisao, aderencia_humana 
+            FROM oportunidades 
+            WHERE excluido IS NOT TRUE
+        """)
+        ativas = cursor.fetchall()
+        descartadas_count = 0
+        for op in ativas:
+            op_id = op['id'] if isinstance(op, dict) else op[0]
+            def extrair_campo(obj, *nomes_possiveis):
+                if isinstance(obj, dict):
+                    for nome in nomes_possiveis:
+                        for k, v in obj.items():
+                            if k.lower() == nome.lower() and v is not None:
+                                return v
+                return ""
+
+            status_rev = extrair_campo(op, 'status_revisao')
+            # Respeita calibragem humana prévia
+            if status_rev in ['aprovado', 'ajustado']:
+                continue
+                
+            bloco_fake = {
+                'titulo': extrair_campo(op, 'titulo'),
+                'categorias': extrair_campo(op, 'tematica', 'categoria'),
+                'descricaoRawText': extrair_campo(op, 'descricaorawtext', 'descricao', 'resumo')
+            }
+            eh_div, motivo_div = verificar_divergencia_sumaria(bloco_fake)
+            if eh_div:
+                cursor.execute('''
+                    UPDATE oportunidades
+                    SET status_revisao = 'descartado', excluido = TRUE, aderencia = 'Baixo',
+                        motivo_feedback = %s, data_feedback = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                ''', (f"Recusado pela IA (Higienização de Escopo): {motivo_div}", op_id))
+                descartadas_count += 1
+                tit = (bloco_fake['titulo'] or 'Sem título')[:50]
+                print(f"🧹 [HIGIENIZAÇÃO] Edital ID {op_id} ('{tit}...') marcado como DESCARTADO: {motivo_div}")
+        
+        conn.commit()
+        if descartadas_count > 0:
+            print(f"✨ Higienização concluída: {descartadas_count} oportunidades divergentes foram descartadas do feed ativo.")
+        else:
+            print("✨ Higienização: Nenhuma oportunidade ativa divergente encontrada no banco.")
+    except Exception as e:
+        print(f"Erro durante a higienização do banco: {e}")
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     init_db()
     
+    # 0. Higienização retroativa de oportunidades que possam ter sido salvas anteriormente
+    print("\n🔍 Executando auditoria e higienização de oportunidades divergentes no banco...")
+    expurgar_editais_divergentes_banco()
+    
     # 1. Carregar temas dinâmicos
     temas_ativos = obter_temas_db()
-    print(f"📌 Temas cadastrados no banco ({len(temas_ativos)}):")
+    print(f"\n📌 Temas cadastrados no banco ({len(temas_ativos)}):")
     for t in temas_ativos:
         print(f"   • {t}")
     
@@ -365,6 +609,21 @@ if __name__ == "__main__":
                     "url_publica": url_publica
                 }
 
+                # Tier 1: Verificação de divergência crítica sumária (Pré-filtro Zero-Token)
+                eh_divergente, motivo_div = verificar_divergencia_sumaria(bloco_enriquecido)
+                if eh_divergente:
+                    print(f"\n🚫 [PRÉ-FILTRO] Edital '{titulo_preview[:45]}' recusado sumariamente por divergência temática.")
+                    print(f"   Motivo: {motivo_div}")
+                    salvar_recusado_prefiltro(
+                        titulo=titulo_preview,
+                        link=url_publica,
+                        motivo=motivo_div,
+                        instituicao=item.get('orgao') or item.get('instituicao') or 'FINEP',
+                        resumo=descricao_limpa[:250],
+                        raw_text=descricao_limpa
+                    )
+                    continue
+
                 # Filtro prévio por palavras-chave / temas
                 corresponde, tema_detectado = contem_palavra_chave(bloco_enriquecido, temas_ativos)
                 if not corresponde:
@@ -372,7 +631,7 @@ if __name__ == "__main__":
                     continue
                 
                 print(f"\n🎯 Palavra-chave detectada: '{tema_detectado}' no edital: '{titulo_preview[:45]}'")
-                print("Enviando para o Gemini com injeção de Few-Shot da memória de aprendizado...")
+                print("Enviando para o Gemini com injeção de Few-Shot da memória e diretriz de recusa de escopo...")
                 
                 resultado_pydantic = analisar_com_ia(
                     bloco_enriquecido,
