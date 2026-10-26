@@ -1,56 +1,291 @@
 # backend/main.py
 import os
-from fastapi import FastAPI, HTTPException
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import psycopg
-from psycopg.rows import dict_row
-from psycopg.errors import UniqueViolation
-from typing import Optional
-from database import get_db_url
+from database import get_db_connection, is_postgres, obter_exemplos_aprendizado, init_db
 
-app = FastAPI(title="API Inovação Metrô")
+app = FastAPI(
+    title="API Inovação Metrô - Buscador de Editais",
+    description="Backend com suporte a Human-in-the-Loop Feedback Engine e Active Learning para Triagem de Oportunidades",
+    version="2.0.0"
+)
 
-# Configuração de CORS para permitir que o React consuma a API
+# Inicializa o banco (tabelas e migrações idempotentes)
+init_db()
+
+# Configuração de CORS para permitir acesso local e em produção
 frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url:
-    origins = [frontend_url]
-else:
-    # Fallback para desenvolvimento local
-    origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+if frontend_url and frontend_url not in origins:
+    origins.append(frontend_url)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"], # Permite consumo flexível em ambiente de desenvolvimento e produção
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def get_db_connection():
-    url = get_db_url()
-    return psycopg.connect(url, row_factory=dict_row)
+# ==================== SCHEMAS PYDANTIC ====================
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "API está no ar."}
-
-# Schemas Pydantic para Temas
 class TemaSchema(BaseModel):
     nome: str = Field(..., min_length=1, description="Nome ou palavra-chave do tema de interesse")
 
+class AderenciaUpdateSchema(BaseModel):
+    aderencia: str = Field(..., description="Novo nível de aderência calibrado pelo humano: Alto, Médio, Baixo")
+    motivo: Optional[str] = Field(None, description="Motivo ou observação da calibração para treinar a IA")
+
+class DescarteSchema(BaseModel):
+    motivo: Optional[str] = Field("Fora do escopo do Metrô", description="Motivo do descarte / falso positivo para treinar a IA")
+
+# ==================== ENDPOINTS DE OPORTUNIDADES ====================
+
+@app.get("/health")
+def health_check():
+    db_mode = "PostgreSQL" if is_postgres() else "SQLite local"
+    return {"status": "ok", "message": "API está ativa.", "database": db_mode}
+
 @app.get("/oportunidades")
-def listar_oportunidades():
+def listar_oportunidades(
+    incluir_descartados: bool = False,
+    status_revisao: Optional[str] = None
+):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM oportunidades ORDER BY data_coleta DESC')
+        
+        query_conditions = []
+        params = []
+        
+        if not incluir_descartados:
+            query_conditions.append("excluido IS NOT TRUE")
+            
+        if status_revisao:
+            query_conditions.append("status_revisao = %s")
+            params.append(status_revisao)
+            
+        where_clause = ""
+        if query_conditions:
+            where_clause = "WHERE " + " AND ".join(query_conditions)
+            
+        query = f"SELECT * FROM oportunidades {where_clause} ORDER BY id DESC"
+        cursor.execute(query, tuple(params) if params else None)
         oportunidades = cursor.fetchall()
-        return oportunidades
+        
+        # Enriquecimento de metadados para o frontend
+        resultado = []
+        for op in oportunidades:
+            op_dict = dict(op)
+            aderencia_humana = op_dict.get('aderencia_humana')
+            aderencia_ia = op_dict.get('aderencia')
+            status = op_dict.get('status_revisao') or 'pendente'
+            
+            op_dict['aderencia_efetiva'] = aderencia_humana or aderencia_ia
+            op_dict['revisado_por_humano'] = bool(aderencia_humana or status in ['aprovado', 'ajustado'])
+            op_dict['excluido'] = bool(op_dict.get('excluido'))
+            resultado.append(op_dict)
+            
+        return resultado
     finally:
         conn.close()
 
-# Endpoints CRUD para Temas / Palavras-chave
+@app.patch("/oportunidades/{op_id}/aderencia")
+def calibrar_aderencia(op_id: int, payload: AderenciaUpdateSchema):
+    """
+    Endpoint principal de Human-in-the-Loop:
+    Permite ao especialista humano alterar ou definir o nível de aderência (Alto, Médio, Baixo)
+    e registrar o motivo, alimentando o dataset de calibração ativa da IA.
+    """
+    nova_aderencia = payload.aderencia.strip().capitalize()
+    if nova_aderencia not in ['Alto', 'Médio', 'Medio', 'Baixo']:
+        raise HTTPException(status_code=400, detail="Aderência inválida. Escolha entre: Alto, Médio ou Baixo.")
+    if nova_aderencia == 'Medio':
+        nova_aderencia = 'Médio'
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, titulo, aderencia FROM oportunidades WHERE id = %s", (op_id,))
+        existente = cursor.fetchone()
+        if not existente:
+            raise HTTPException(status_code=404, detail="Oportunidade não encontrada.")
+
+        motivo_final = payload.motivo.strip() if payload.motivo else f"Aderência reclassificada para {nova_aderencia} pelo especialista"
+
+        cursor.execute('''
+            UPDATE oportunidades
+            SET aderencia_humana = %s,
+                status_revisao = 'ajustado',
+                motivo_feedback = %s,
+                excluido = FALSE,
+                data_feedback = CURRENT_TIMESTAMP
+            WHERE id = %s
+        ''', (nova_aderencia, motivo_final, op_id))
+        
+        conn.commit()
+        
+        cursor.execute("SELECT * FROM oportunidades WHERE id = %s", (op_id,))
+        atualizado = dict(cursor.fetchone())
+        atualizado['aderencia_efetiva'] = atualizado.get('aderencia_humana') or atualizado.get('aderencia')
+        atualizado['revisado_por_humano'] = True
+        return {
+            "message": "Aderência calibrada com sucesso! O feedback foi incorporado à memória de treinamento da IA.",
+            "oportunidade": atualizado
+        }
+    finally:
+        conn.close()
+
+@app.post("/oportunidades/{op_id}/aprovar")
+def aprovar_aderencia(op_id: int):
+    """
+    Valida e confirma que a classificação da IA estava correta,
+    reforçando os exemplos positivos de aprendizado.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, titulo, aderencia FROM oportunidades WHERE id = %s", (op_id,))
+        existente = cursor.fetchone()
+        if not existente:
+            raise HTTPException(status_code=404, detail="Oportunidade não encontrada.")
+
+        aderencia_ia = existente.get('aderencia') or 'Médio'
+        motivo = f"Aprovado pelo especialista: Classificação da IA ({aderencia_ia}) confirmada como adequada."
+
+        cursor.execute('''
+            UPDATE oportunidades
+            SET aderencia_humana = %s,
+                status_revisao = 'aprovado',
+                motivo_feedback = %s,
+                excluido = FALSE,
+                data_feedback = CURRENT_TIMESTAMP
+            WHERE id = %s
+        ''', (aderencia_ia, motivo, op_id))
+        
+        conn.commit()
+        return {"message": "Classificação da IA confirmada e gravada como referência positiva para futuros editais."}
+    finally:
+        conn.close()
+
+@app.post("/oportunidades/{op_id}/descartar")
+@app.delete("/oportunidades/{op_id}")
+def descartar_oportunidade(op_id: int, payload: Optional[DescarteSchema] = None):
+    """
+    Exclui a oportunidade da listagem ativa (soft-delete) e registra a justificativa
+    do descarte para que a IA aprenda a NÃO sugerir editais semelhantes no futuro (Negative Few-Shot).
+    """
+    motivo = (payload.motivo if payload and payload.motivo else "Falso positivo descartado pelo usuário").strip()
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, titulo FROM oportunidades WHERE id = %s", (op_id,))
+        existente = cursor.fetchone()
+        if not existente:
+            raise HTTPException(status_code=404, detail="Oportunidade não encontrada.")
+
+        cursor.execute('''
+            UPDATE oportunidades
+            SET excluido = TRUE,
+                status_revisao = 'descartado',
+                motivo_feedback = %s,
+                data_feedback = CURRENT_TIMESTAMP
+            WHERE id = %s
+        ''', (motivo, op_id))
+        
+        conn.commit()
+        return {
+            "message": "Edital descartado da lista e registrado na memória negativa da IA para evitar falsos positivos.",
+            "id": op_id,
+            "motivo": motivo
+        }
+    finally:
+        conn.close()
+
+@app.post("/oportunidades/{op_id}/restaurar")
+def restaurar_oportunidade(op_id: int):
+    """Restaura um edital previamente descartado."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM oportunidades WHERE id = %s", (op_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Oportunidade não encontrada.")
+
+        cursor.execute('''
+            UPDATE oportunidades
+            SET excluido = FALSE,
+                status_revisao = 'pendente'
+            WHERE id = %s
+        ''', (op_id,))
+        conn.commit()
+        return {"message": "Oportunidade restaurada para a lista ativa com sucesso.", "id": op_id}
+    finally:
+        conn.close()
+
+# ==================== ENDPOINTS DE APRENDIZADO DA IA ====================
+
+@app.get("/ia/aprendizado")
+def obter_metricas_aprendizado():
+    """
+    Retorna métricas de alinhamento e as amostras ativas que estão
+    sendo injetadas no prompt do Gemini para calibrar decisões futuras.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # Contagem geral
+        cursor.execute("SELECT COUNT(*) as count FROM oportunidades WHERE excluido IS NOT TRUE")
+        total_ativas = cursor.fetchone()['count']
+        
+        cursor.execute("SELECT COUNT(*) as count FROM oportunidades WHERE status_revisao IN ('aprovado', 'ajustado')")
+        total_calibradas = cursor.fetchone()['count']
+        
+        cursor.execute("SELECT COUNT(*) as count FROM oportunidades WHERE status_revisao = 'descartado' OR excluido IS TRUE")
+        total_descartadas = cursor.fetchone()['count']
+        
+        cursor.execute("SELECT COUNT(*) as count FROM oportunidades WHERE status_revisao = 'pendente' AND excluido IS NOT TRUE")
+        total_pendentes = cursor.fetchone()['count']
+        
+        # Taxa de concordância IA vs Humano
+        cursor.execute('''
+            SELECT COUNT(*) as count FROM oportunidades 
+            WHERE status_revisao = 'aprovado' 
+               OR (status_revisao = 'ajustado' AND LOWER(COALESCE(aderencia_humana, '')) = LOWER(COALESCE(aderencia, '')))
+        ''')
+        total_concordancias = cursor.fetchone()['count']
+        
+        taxa_concordancia = 0.0
+        if total_calibradas > 0:
+            taxa_concordancia = round((total_concordancias / total_calibradas) * 100, 1)
+        
+        # Recupera amostras ativas de aprendizado (Few-Shot)
+        positivos, negativos = obter_exemplos_aprendizado(limite=4)
+        
+        return {
+            "metricas": {
+                "total_ativas": total_ativas,
+                "total_calibradas_humano": total_calibradas,
+                "total_falsos_positivos_descartados": total_descartadas,
+                "total_pendentes_revisao": total_pendentes,
+                "taxa_concordancia_ia_humano": f"{taxa_concordancia}%",
+                "status_aprendizado": "Ativo com Feedback em Tempo Real"
+            },
+            "exemplos_ativos_injetados_na_ia": {
+                "positivos_referencia": positivos,
+                "negativos_falsos_positivos": negativos
+            }
+        }
+    finally:
+        conn.close()
+
+# ==================== ENDPOINTS CRUD PARA TEMAS ====================
+
 @app.get("/temas")
 def listar_temas():
     conn = get_db_connection()
@@ -71,13 +306,14 @@ def criar_tema(tema: TemaSchema):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT id FROM temas WHERE LOWER(nome) = LOWER(%s)", (nome_limpo,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"O tema '{nome_limpo}' já está cadastrado.")
+
         cursor.execute("INSERT INTO temas (nome) VALUES (%s) RETURNING id, nome, data_criacao", (nome_limpo,))
         novo_tema = cursor.fetchone()
         conn.commit()
         return novo_tema
-    except UniqueViolation:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"O tema '{nome_limpo}' já está cadastrado.")
     finally:
         conn.close()
 
@@ -94,14 +330,15 @@ def atualizar_tema(tema_id: int, tema: TemaSchema):
         existente = cursor.fetchone()
         if not existente:
             raise HTTPException(status_code=404, detail="Tema não encontrado.")
+
+        cursor.execute("SELECT id FROM temas WHERE LOWER(nome) = LOWER(%s) AND id != %s", (nome_limpo, tema_id))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"Já existe outro tema cadastrado com o nome '{nome_limpo}'.")
         
         cursor.execute("UPDATE temas SET nome = %s WHERE id = %s RETURNING id, nome, data_criacao", (nome_limpo, tema_id))
         atualizado = cursor.fetchone()
         conn.commit()
         return atualizado
-    except UniqueViolation:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Já existe outro tema com o nome '{nome_limpo}'.")
     finally:
         conn.close()
 
@@ -119,4 +356,4 @@ def remover_tema(tema_id: int):
         conn.commit()
         return {"message": "Tema removido com sucesso", "id": tema_id}
     finally:
-        conn.close()
+        conn.close()
