@@ -63,12 +63,20 @@ uvicorn main:app --reload --port 8000
 ```
 > A API estará disponível em `http://localhost:8000` (documentação Swagger em `http://localhost:8000/docs`). As tabelas do PostgreSQL são inicializadas automaticamente na primeira execução.
 
-#### Executar a Coleta/Scraper (sob demanda):
+#### Executar a Coleta/Scrapers (sob demanda):
 Em um novo terminal (com o ambiente virtual ativo na pasta `backend`):
 ```bash
+# Executar todas as fontes ativas (FINEP, FAPESP, etc.):
 python scraper_ai.py
+
+# Ou filtrar por uma fonte específica:
+python scraper_ai.py --fonte finep
+python scraper_ai.py --fonte fapesp
+
+# Listar todas as fontes cadastradas no catálogo:
+python scraper_ai.py --listar
 ```
-> O scraper busca os editais na FINEP, filtra pelos temas cadastrados no banco, classifica via Gemini e salva as novas oportunidades no PostgreSQL.
+> Cada scraper busca oportunidades na sua fonte (REST API ou Web Scraping HTML) e envia para a pipeline unificada, que filtra pelos temas cadastrados no banco, classifica via Gemini e salva as novas oportunidades no PostgreSQL.
 
 ---
 
