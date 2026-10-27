@@ -14,6 +14,7 @@ import sys
 import json
 import unicodedata
 import re
+import time
 from typing import Optional, List, Dict, Any, Tuple
 
 if sys.stdout.encoding != 'utf-8':
@@ -344,7 +345,15 @@ def analisar_com_ia(
             break
         except Exception as err:
             ultimo_erro = err
-            print(f"⚠️ Modelo '{nome_modelo}' indisponível ou com sobrecarga ({err}). Tentando próximo modelo...")
+            err_msg = str(err).lower()
+            if "429" in err_msg or "resource_exhausted" in err_msg or "quota" in err_msg:
+                print(f"⚠️ Modelo '{nome_modelo}' atingiu limite de requisições por minuto (RPM). Aguardando 5s antes do fallback...")
+                time.sleep(5)
+            elif "503" in err_msg or "unavailable" in err_msg:
+                print(f"⚠️ Modelo '{nome_modelo}' com instabilidade temporária (503). Alternando modelo...")
+                time.sleep(1)
+            else:
+                print(f"⚠️ Modelo '{nome_modelo}' indisponível ({err}). Tentando próximo modelo...")
             continue
 
     if response is None:
@@ -556,6 +565,9 @@ def processar_item_edital(
 
     # 4. Tier 3: Análise com IA
     try:
+        # Espaçamento preventivo de Rate-Limiting para Free Tier (limite de 15 RPM = ~4s por requisição)
+        time.sleep(3.5)
+
         oportunidade = analisar_com_ia(
             bloco_enriquecido,
             item.link,

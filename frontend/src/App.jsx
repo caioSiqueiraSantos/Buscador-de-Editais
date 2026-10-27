@@ -575,7 +575,7 @@ function App() {
                             rel="noreferrer"
                             className="flex items-center justify-center gap-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold px-3 py-2 rounded-xl transition-all text-xs hover:shadow-[0_0_12px_rgba(6,182,212,0.2)]"
                           >
-                            <span>FINEP</span>
+                            <span>Ir ao site</span>
                             <svg className="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                             </svg>
