@@ -1,93 +1,102 @@
-# Fluxo de Dados e Processamento
+# Fluxo de Dados e Processamento (MVP)
 
-Este documento descreve o caminho dos dados desde a FINEP até a interface publicada.
+Este documento detalha o caminho percorrido pelos dados: da coleta nas fontes ao processamento por IA, agendamento via n8n e consumo no frontend.
 
-## 1. Coleta
+---
 
-O `backend/scraper_ai.py` é executado manualmente no terminal. Ele:
+## 1. Coleta Multi-fonte
 
-1. consulta o endpoint REST público de chamadas da FINEP;
-2. desserializa a resposta JSON;
-3. ignora itens antigos ou encerrados;
-4. infere o link público da chamada e verifica duplicidade no PostgreSQL;
-5. carrega os temas ativos da tabela `temas`.
+A pipeline coleta chamadas públicas a partir de múltiplos órgãos com módulos independentes:
 
-## 2. Filtro de temas
+1. **FINEP:** Consulta o endpoint REST público da instituição, obtendo chamadas abertas e vigentes em formato JSON.
+2. **FAPESP:** Realiza scraping HTML na listagem oficial de chamadas com paginação e extração de metadados.
+3. As fontes retornam objetos unificados (`RawOpportunity`) contendo título, descrição bruta, prazo preliminar e link da chamada.
 
-O scraper normaliza o texto dos campos retornados pela FINEP e procura correspondências com os temas cadastrados.
+---
 
-- Sem correspondência, o item é descartado sem chamada ao Gemini.
-- Com correspondência, o item segue para análise semântica.
+## 2. Orquestração e Agendamento (n8n)
 
-Essa etapa reduz custo, tempo de processamento e volume enviado à IA.
+1. **Disparo Semanal:** Um workflow no **n8n** é disparado semanalmente por um agendador (cron trigger).
+2. O n8n aciona o backend para executar a rodada completa de busca em todas as fontes cadastradas.
+3. Ao término do processamento:
+   - O n8n recebe ou consulta as novas oportunidades processadas;
+   - Aplica filtro nas oportunidades classificadas com aderência **Alta**;
+   - Gera um comunicado enumerado com título, instituição, prazo e resumo executivo;
+   - Inclui o **link pré-filtrado da interface web** (ex: `/?aderencia=Alta`), permitindo que a equipe acesse os editais prioritários com um único clique.
 
-## 3. Análise com Gemini
+---
 
-Para itens aprovados no filtro, o scraper envia ao Gemini um bloco contendo:
+## 3. Pré-filtro Temático
 
-- título;
-- descrição bruta;
-- taxonomia;
-- datas de vigência;
-- prazo proposto;
-- link público;
-- temas ativos.
+Antes de qualquer chamada para a IA:
+- O sistema consulta a tabela `temas` no PostgreSQL;
+- Realiza uma varredura de palavras-chave no título e descrição de cada edital coletado;
+- **Editais sem aderência aos temas cadastrados são descartados imediatamente**, economizando custo de tokens e tempo de resposta.
 
-A resposta é validada pelo schema `Oportunidade` e contém categoria, resumo, tema, prazo, aderência e demais campos necessários à interface. O texto bruto original também é preservado.
+---
 
-## 4. Persistência
+## 4. Análise Semântica com IA (Google Gemini)
 
-O resultado validado é inserido ou atualizado no PostgreSQL:
+Para os editais aprovados no filtro temático:
+- Os metadados e o texto bruto são enviados ao Gemini com um prompt estruturado;
+- A IA avalia a sinergia com os temas estratégicos (ex: mobilidade sobre trilhos, inovação, transição energética);
+- Retorna um JSON estrito validado com: categoria, resumo executivo de alto nível, temáticas identificadas, prazo consolidado e nível de aderência (**Alto**, **Médio**, **Baixo**).
 
-1. o link e o título são verificados para evitar duplicação;
-2. oportunidades existentes podem ser atualizadas com o conteúdo mais recente;
-3. oportunidades novas são inseridas com `link` único;
-4. os temas permanecem disponíveis para o próximo ciclo de coleta.
+---
 
-## 5. Distribuição pela API
+## 5. Persistência e Deduplicação
 
-O frontend nunca consulta o PostgreSQL diretamente. Ele envia requisições HTTPS para a API FastAPI publicada:
+1. O banco PostgreSQL armazena as oportunidades com chave única sobre o `link`;
+2. Se uma oportunidade já existir no banco, seus dados podem ser atualizados se houver alteração de prazo ou descrição;
+3. O texto bruto original (`descricaoRawText`) é armazenado permanentemente para histórico e conferência interna.
 
-- `GET /oportunidades` retorna oportunidades ordenadas por data;
-- `GET /temas` retorna os temas cadastrados;
-- as rotas `POST`, `PUT` e `DELETE /temas` permitem o gerenciamento dos temas;
-- `GET /health` permite verificar a disponibilidade da API.
+---
 
-A API usa a variável de ambiente de conexão para acessar o PostgreSQL e a configuração de CORS para aceitar a origem do frontend.
-
-## 6. Visualização
-
-Ao abrir o painel React:
-
-1. `App.jsx` carrega oportunidades e temas;
-2. os dados são normalizados para apresentação;
-3. o usuário pode pesquisar por título ou instituição;
-4. os resultados podem ser filtrados por tema, prazo e aderência;
-5. o modal de temas permite criar, editar e remover palavras-chave;
-6. a interface exibe o texto bruto armazenado quando o usuário consulta uma oportunidade.
-
-## Diagrama do pipeline
+## 6. Diagrama do Pipeline de Dados
 
 ```mermaid
 flowchart TD
-    A[API REST da FINEP] --> B[Scraper executado no terminal]
-    B --> C{Já existe no PostgreSQL?}
-    C -->|Sim| D[Ignora ou atualiza conforme a regra]
-    C -->|Não| E{Corresponde a um tema ativo?}
-    E -->|Não| F[Descarta sem chamar a IA]
-    E -->|Sim| G[Análise estruturada pelo Gemini]
-    G --> H[PostgreSQL: oportunidades]
-    T[(PostgreSQL: temas)] -.->|Temas ativos| E
-    T -.->|Temas no prompt| G
-    H --> I[API FastAPI publicada]
-    I --> J[Frontend React publicado]
-    J -->|CRUD /temas| I
-    I --> T
+    subgraph Orquestracao [Orquestração n8n]
+        Cron[Cron Semanal] --> Trigger[Disparo n8n]
+        Trigger --> RunPipeline[Executa Backend Pipeline]
+    end
+
+    subgraph Fontes [Fontes de Dados Integradas]
+        FINEP[FINEP - API REST]
+        FAPESP[FAPESP - Web Scraping]
+    end
+
+    RunPipeline --> FINEP
+    RunPipeline --> FAPESP
+    FINEP --> RawData[Editais Brutos Coletados]
+    FAPESP --> RawData
+
+    subgraph FiltroEProcessamento [Filtro e Processamento]
+        RawData --> CheckDup{Já existe no banco?}
+        CheckDup -->|Sim| Skip[Atualiza se necessário / Ignora]
+        CheckDup -->|Não| MatchTheme{Corresponde a tema ativo?}
+        MatchTheme -->|Não| Discard[Descarte sem gastar IA]
+        MatchTheme -->|Sim| Gemini[Classificação Estruturada Gemini]
+    end
+
+    Gemini --> DB[(PostgreSQL: oportunidades)]
+    
+    subgraph Notificacao [Notificação e Entrega]
+        DB --> NotifyN8N[n8n: Filtra Alta Aderência]
+        NotifyN8N --> TeamsAlert["Alerta Ordenado + Link Pré-filtrado"]
+    end
+
+    subgraph Visualizacao [Visualização]
+        DB --> API[FastAPI REST]
+        API --> Front[Frontend React]
+    end
 ```
 
-## Observações operacionais
+---
 
-- A execução do scraper é independente da disponibilidade da interface.
-- Depois que o scraper grava dados, a interface passa a enxergá-los por meio da API.
-- O PostgreSQL hospedado é a fonte persistente compartilhada entre a execução local do scraper e os serviços publicados.
-- URLs, credenciais e chaves são obtidas do ambiente de execução; não fazem parte do fluxo do frontend.
+## 7. Preparação para Nuvem Corporativa Azure
+
+O fluxo atual é 100% aderente aos padrões exigidos pela transição corporativa para a **Azure**:
+- Chamadas entre frontend e backend via HTTPS com autenticação futura via Entra ID;
+- Banco relacional PostgreSQL pronto para ser apontado para Azure Database for PostgreSQL;
+- n8n acionando endpoints autenticados da API corporativa.

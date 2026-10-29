@@ -1,18 +1,44 @@
-# 🔍 Buscador de Oportunidades para Inovação
+# 🔍 Buscador de Oportunidades para Inovação (MVP)
 
 Aplicação web e pipeline de dados para busca, triagem e estruturação automatizada de editais, chamadas públicas e oportunidades de fomento à inovação (com foco em mobilidade urbana e tecnologias estratégicas).
 
+> **Status do Projeto:** Atualmente em estágio de **MVP (Mínimo Produto Viável)**, concebido com arquitetura modular para migração e integração futura à **infraestrutura corporativa em nuvem da Microsoft Azure**.
+
 ---
 
-## 🎯 Utilidade
+## 🎯 Utilidade e Fontes Integradas
 
 O sistema automatiza o monitoramento de fontes de fomento e parcerias tecnológicas:
 
-1. **Coleta de dados:** Consulta diretamente a API REST pública da FINEP (com suporte arquitetural para futuras integrações como FAPESP e SENAI).
+1. **Coleta de dados multi-fonte:** Coleta estruturada com suporte ativo a:
+   - **FINEP:** Consulta via API REST pública de chamadas públicas abertas e vigentes.
+   - **FAPESP:** Coleta e parsing automatizado via web scraping com suporte a paginação e extração de detalhes.
+   *(Estrutura extensível para novos órgãos como SENAI, CNPq, BNDES, etc.)*
 2. **Triagem temática:** Filtra chamadas com base em temas de interesse cadastrados (ex.: mobilidade sobre trilhos, hidrogênio verde, IA, MaaS), descartando itens irrelevantes antes do envio à IA para economizar requisições.
 3. **Análise com IA (Google Gemini):** Estrutura e classifica oportunidades aderentes, extraindo resumos executivos, prazos e nível de aderência (*Alto*, *Médio*, *Baixo*).
 4. **Armazenamento centralizado:** Persiste editais e temas em banco de dados PostgreSQL com controle de duplicidade.
 5. **Painel de visualização:** Interface web interativa em React para pesquisa, filtros rápidos, visualização do edital bruto e gerenciamento do CRUD de temas em tempo real.
+
+---
+
+## 🔄 Automação e Notificações (Fluxo n8n)
+
+Para a operação contínua e automatizada do MVP, o fluxo de agendamento e alerta opera via **n8n**:
+- **Disparo Semanal:** O n8n executa semanalmente uma rotina agendada (cron) que aciona o buscador/pipeline no backend para processar as novidades da semana em todas as fontes ativas (FINEP, FAPESP).
+- **Notificação de Oportunidades de Alta Aderência:** O workflow filtra as oportunidades identificadas com aderência **Alta** e envia uma notificação automática (e-mail, Teams ou Slack) contendo:
+  1. **Lista numerada** das oportunidades com alta aderência identificadas na rodada;
+  2. **Resumo executivo, instituição e prazo de submissão** de cada item;
+  3. **Link direto pré-filtrado** para a interface web (com o filtro de alta aderência já aplicado), direcionando a equipe técnica diretamente para a análise das oportunidades prioritárias.
+
+---
+
+## ☁️ Planejamento de Integração com Azure Corporativa
+
+O MVP foi projetado de forma desacoplada para facilitar a transição para a infraestrutura corporativa na **Microsoft Azure**:
+- **Backend e APIs:** Migração planejada para **Azure App Services** ou **Azure Container Apps** (com suporte a escalabilidade e rede virtual corporativa).
+- **Banco de Dados:** Transição para **Azure Database for PostgreSQL** (instância gerenciada com isolamento de rede e conexão via VNet / Private Endpoints).
+- **Frontend:** Hospedagem em **Azure Static Web Apps** com controle de acesso corporativo via **Microsoft Entra ID (Azure AD)**.
+- **Orquestração e Notificações:** Integração contínua do n8n / **Azure Logic Apps** para disparos periódicos e notificações corporativas via Microsoft Teams.
 
 ---
 
@@ -106,16 +132,16 @@ npm run dev
 
 ---
 
-## 🚀 Deploy
+## 🚀 Deploy e Infraestrutura
 
 A arquitetura desacoplada permite o deploy independente de cada componente:
 
-| Componente | Hospedagem Recomendada | Variáveis de Ambiente Necessárias |
-|---|---|---|
-| **Frontend** | **Vercel** | `VITE_API_URL` (URL pública da API no backend) |
-| **Backend (API)** | **Render** / Railway / Fly.io | `DATABASE_URL`, `GEMINI_API_KEY`, `FRONTEND_URL` (URL da Vercel) |
-| **Banco de Dados** | **Neon** / Supabase / Render PG | PostgreSQL gerenciado com conexão SSL |
-| **Scraper** | Terminal local, GitHub Actions ou Cron Job | `DATABASE_URL`, `GEMINI_API_KEY` |
+| Componente | Ambiente Atual (MVP) | Destino Corporativo (Planejado) | Variáveis de Ambiente |
+|---|---|---|---|
+| **Frontend** | Static Hosting / Vercel | **Azure Static Web Apps** (com Entra ID / SSO) | `VITE_API_URL` |
+| **Backend (API)** | Container / Nuvem Gerenciada | **Azure App Services / Container Apps** | `DATABASE_URL`, `GEMINI_API_KEY`, `FRONTEND_URL` |
+| **Banco de Dados** | PostgreSQL Gerenciado (Neon/Supabase) | **Azure Database for PostgreSQL** | PostgreSQL com SSL / VNet |
+| **Automação / Scraper** | Execução local ou agendada | **n8n / Azure Logic Apps** (disparo semanal e alertas) | `DATABASE_URL`, `GEMINI_API_KEY` |
 
-- **Ambiente de produção:** Deploy configurado via Vercel (frontend) e nuvem gerenciada (backend e banco de dados).
+- **Ambiente atual:** Deploy configurado via Vercel (frontend) e nuvem gerenciada (backend e banco de dados).
 - Mais detalhes sobre a arquitetura e o fluxo de processamento podem ser encontrados na pasta [`doc/`](doc/).

@@ -1,45 +1,59 @@
-# Arquitetura do Sistema
+# Arquitetura do Sistema (MVP)
 
-## 1. Visão da solução
+## 1. Visão da Solução
 
 ```text
-Usuário
+Equipe / Usuário Corporativo
    |
    v
-Frontend React/Vite publicado
+Frontend React/Vite (Planejado: Azure Static Web Apps com Entra ID)
    |
-   | HTTPS / JSON
+   | HTTPS / JSON (CORS restrito)
    v
-API FastAPI publicada
+API FastAPI (Planejado: Azure Container Apps / App Service)
    |
-   | conexão privada por variável de ambiente
+   | Conexão segura / SSL (Planejado: VNet / Private Endpoint)
    v
-PostgreSQL hospedado
-
-Scraper FINEP + Gemini
-   | execução manual pelo terminal
-   +-----------------------> PostgreSQL hospedado
+PostgreSQL (Planejado: Azure Database for PostgreSQL)
+   ^
+   | Gravação unificada das oportunidades
+   |
+Pipeline de Coleta e IA (backend/pipeline.py)
+   ^
+   | Acionamento Semanal / Webhook
+   |
+Orquestrador n8n (Disparo semanal + Notificação de Alta Aderência)
+   |
+   +---> Fontes Ativas: [FINEP (REST API), FAPESP (Scraper HTML)]
+   +---> Disparo de Alerta: [Teams / E-mail com Link Pré-filtrado]
 ```
 
-O frontend não acessa o banco diretamente. Toda leitura ou alteração passa pela API FastAPI.
+---
 
-## 2. Stack tecnológica
+## 2. Stack Tecnológica do MVP
 
-- **Coleta:** Python e `requests`, consumindo o endpoint REST da FINEP.
-- **IA:** Google Gemini por meio do pacote `google-genai`, com resposta estruturada validada por Pydantic.
-- **Backend:** FastAPI executado por Uvicorn.
-- **Banco:** PostgreSQL, acessado pelo backend e pelo scraper por meio da variável de ambiente de conexão.
-- **Frontend:** React em uma SPA empacotada pelo Vite.
-- **Estilização:** Tailwind CSS e CSS da aplicação.
+- **Fontes e Coleta:** Python, `requests`, `beautifulsoup4`, com arquitetura modular de scrapers (`backend/scrapers/`).
+- **IA Semântica:** Google Gemini por meio do SDK `google-genai`, com validação estruturada via Pydantic.
+- **Backend:** FastAPI assíncrono executado por Uvicorn.
+- **Banco de Dados:** PostgreSQL relacional com controle de unicidade por link.
+- **Frontend:** Single Page Application (SPA) em React com Vite e Tailwind CSS.
+- **Automação e Notificações:** **n8n** gerenciando cron semanal e envio de alertas com links pré-filtrados.
 
-## 3. Organização do projeto
+---
+
+## 3. Organização do Projeto
 
 ```text
 Buscador-de-Editais/
 ├── backend/
 │   ├── database.py              # Conexão e inicialização do PostgreSQL
-│   ├── scraper_ai.py            # Coleta, filtro, IA e persistência
-│   ├── main.py                  # API REST e CRUD de temas
+│   ├── pipeline.py              # Pipeline unificada (filtro temático + Gemini + deduplicação)
+│   ├── scraper_ai.py            # Ponto de entrada CLI para coletas
+│   ├── scrapers/                # Módulos especializados por órgão
+│   │   ├── base.py              # Classe base abstrata para scrapers
+│   │   ├── finep.py             # Integração FINEP (API REST)
+│   │   └── fapesp.py            # Integração FAPESP (Web Scraping)
+│   ├── main.py                  # API REST FastAPI e CRUD de temas
 │   └── requirements.txt         # Dependências Python
 ├── doc/
 │   ├── 01_Visao_Geral_PoC.md
@@ -51,46 +65,39 @@ Buscador-de-Editais/
     └── src/
         ├── App.jsx
         └── components/
-            └── GerenciadorTemas.jsx
+            ├── GerenciadorTemas.jsx
+            ├── ModalDescarte.jsx
+            └── PainelAprendizadoIA.jsx
 ```
 
-Arquivos `.env` são usados apenas no ambiente de execução e não devem ser versionados.
+---
 
-## 4. Responsabilidades
+## 4. Responsabilidades dos Módulos
 
-### Scraper
+### Módulos de Scrapers (`scrapers/`)
+Cada fonte de fomento possui seu próprio coletor herdado de `BaseScraper`. Ele sabe como consultar a fonte (seja via REST API como a FINEP ou via parser HTML como a FAPESP) e retorna uma lista padronizada de editais brutos.
 
-`scraper_ai.py` é um processo batch independente da API. Ele consulta a FINEP, descarta itens irrelevantes, solicita a análise do Gemini para os itens aderentes e grava os resultados no PostgreSQL.
+### Pipeline Central (`pipeline.py`)
+Centraliza as regras de negócio:
+1. Normalização de datas e termos;
+2. Pré-filtro baseado nos temas ativos do banco;
+3. Chamada estruturada ao Gemini apenas para itens aderentes;
+4. Gravação idempotente no PostgreSQL.
 
-### API
+### Automação n8n
+- **Gatilho de Execução:** Executa periodicamente a cada semana chamando o backend.
+- **Notificação:** Analisa as saídas, filtra por aderência `Alta`, enumera as oportunidades e envia alerta aos responsáveis contendo o link da aplicação já filtrado por alta relevância.
 
-`main.py` fornece:
+---
 
-- `GET /oportunidades`
-- `GET /temas`
-- `POST /temas`
-- `PUT /temas/{tema_id}`
-- `DELETE /temas/{tema_id}`
-- `GET /health`, quando habilitado no ambiente publicado
+## 5. Planejamento de Integração Azure Corporativa
 
-### Frontend
+O MVP foi projetado respeitando padrões corporativos de nuvem para transição suave à infraestrutura Azure:
 
-`App.jsx` consulta oportunidades e temas e aplica busca e filtros no navegador. `GerenciadorTemas.jsx` executa o CRUD de temas pela API.
-
-## 5. Decisões arquiteturais
-
-- **Batch separado da API:** o scraper não precisa permanecer rodando para que o painel funcione.
-- **PostgreSQL compartilhado:** API e scraper consultam a mesma fonte persistente.
-- **Filtro antes da IA:** reduz chamadas ao Gemini e evita processar itens sem aderência temática.
-- **Deduplicação em duas camadas:** a aplicação verifica registros existentes e o banco mantém unicidade no link.
-- **Retenção do texto bruto:** permite consultar o conteúdo armazenado mesmo que a página original seja alterada ou removida.
-- **Configuração por ambiente:** URLs, credenciais e chaves não ficam no código.
-- **CORS restrito:** a API deve aceitar a origem publicada do frontend e, quando necessário, a origem local de desenvolvimento.
-
-## 6. Evoluções futuras
-
-- Agendamento automático do scraper.
-- Integração com novas fontes.
-- Autenticação e autorização.
-- Notificações por e-mail ou Teams.
-- Observabilidade, auditoria e métricas de execução.
+| Componente | Implementação MVP | Alvo Corporativo Azure |
+|---|---|---|
+| **API Backend** | FastAPI / Container | **Azure App Service** ou **Azure Container Apps** |
+| **Banco de Dados** | PostgreSQL gerenciado | **Azure Database for PostgreSQL (Flexible Server)** com VNet e Private Link |
+| **Frontend** | React / SPA | **Azure Static Web Apps** com Single Sign-On (**Microsoft Entra ID**) |
+| **Agendamento** | n8n | **Azure Logic Apps** ou n8n corporativo |
+| **Segurança e Chaves** | Variáveis de ambiente | **Azure Key Vault** para chaves de API e segredos de banco |
