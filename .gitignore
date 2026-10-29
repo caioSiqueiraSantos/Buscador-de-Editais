@@ -5,6 +5,8 @@
 .env.development.local
 .env.test.local
 .env.production.local
+*.local.txt
+deploy_links*.txt
 
 # === PYTHON ===
 # Pastas do ambiente virtual (onde ficam as bibliotecas instaladas)
