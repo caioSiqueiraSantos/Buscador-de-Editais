@@ -125,6 +125,30 @@ function App() {
   }, [incluirDescartados])
 
   useEffect(() => {
+    // Inicializacao de filtros a partir de query params (ex: link direto do n8n / Teams)
+    const params = new URLSearchParams(window.location.search)
+    const aderenciaParam = params.get('aderencia')
+    if (aderenciaParam) {
+      const limpo = aderenciaParam.trim().toLowerCase()
+      if (limpo === 'alta' || limpo === 'alto') {
+        setFiltroAderencia('Alto')
+      } else if (limpo === 'media' || limpo === 'médio' || limpo === 'medio') {
+        setFiltroAderencia('Médio')
+      } else if (limpo === 'baixa' || limpo === 'baixo') {
+        setFiltroAderencia('Baixo')
+      }
+    }
+
+    const buscaParam = params.get('busca')
+    if (buscaParam) {
+      setBusca(buscaParam)
+    }
+
+    const temaParam = params.get('tema')
+    if (temaParam) {
+      setFiltroTema(temaParam)
+    }
+
     carregarTemasBanco()
     carregarEstatisticasIA()
   }, [])

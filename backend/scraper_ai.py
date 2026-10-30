@@ -20,6 +20,7 @@ from pipeline import (
     obter_exemplos_aprendizado,
     expurgar_editais_divergentes_banco,
     executar_scraper,
+    executar_pipeline_completa,
     # Re-exportações para manter compatibilidade retroativa
     Oportunidade,
     analisar_com_ia,
@@ -40,48 +41,9 @@ from scrapers import (
 
 def executar_coleta_geral(fontes_selecionadas: List[str] = None):
     """Executa a rotina de auditoria e coleta das fontes registradas."""
-    init_db()
-
-    # 1. Higienização retroativa de oportunidades que possam ter sido salvas anteriormente
-    print("\n🔍 Executando auditoria e higienização de oportunidades divergentes no banco...")
-    expurgar_editais_divergentes_banco()
-
-    # 2. Informações de temas e memória ativa
-    temas = obter_temas_db()
-    print(f"\n📌 Temas cadastrados no banco ({len(temas)}):")
-    for t in temas:
-        print(f"   • {t}")
-
-    exemplos_pos, exemplos_neg = obter_exemplos_aprendizado(limite=4)
-    print(f"\n🧠 Memória de Aprendizado Ativo carregada:")
-    print(f"   • {len(exemplos_pos)} exemplos positivos de calibração humana")
-    print(f"   • {len(exemplos_neg)} exemplos de falsos positivos descartados")
-
-    # 3. Determina quais scrapers executar
-    if fontes_selecionadas:
-        scrapers_alvo = []
-        for f in fontes_selecionadas:
-            s = obter_scraper(f)
-            if s:
-                scrapers_alvo.append(s)
-            else:
-                print(f"⚠️ Fonte '{f}' não encontrada no catálogo de scrapers.")
-    else:
-        scrapers_alvo = listar_scrapers()
-
-    if not scrapers_alvo:
-        print("❌ Nenhum scraper válido para execução.")
-        return
-
-    print(f"\n🌐 Fontes ativas para esta rodada: {[s.nome_fonte for s in scrapers_alvo]}")
-
-    for scraper in scrapers_alvo:
-        try:
-            executar_scraper(scraper)
-        except Exception as e:
-            print(f"❌ Erro crítico ao executar scraper [{scraper.nome_fonte}]: {e}")
-
+    resultado = executar_pipeline_completa(fontes_selecionadas=fontes_selecionadas)
     print("\n🏁 Processo de coleta e triagem finalizado para todas as fontes.")
+    print(f"📊 Total de itens de Alta Aderência encontrados nesta rodada: {resultado['total_alta_aderencia']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Orquestrador Modular de Coleta e Triagem de Editais com IA")

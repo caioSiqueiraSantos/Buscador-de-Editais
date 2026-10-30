@@ -2,15 +2,16 @@
 import os
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from database import get_db_connection, is_postgres, obter_exemplos_aprendizado, init_db
+from pipeline import executar_pipeline_completa
 
 app = FastAPI(
     title="API Inovação Metrô - Buscador de Editais",
-    description="Backend com suporte a Human-in-the-Loop Feedback Engine e Active Learning para Triagem de Oportunidades",
-    version="2.0.0"
+    description="Backend com suporte a Human-in-the-Loop Feedback Engine, Active Learning e Orquestração n8n",
+    version="2.1.0"
 )
 
 # Inicializa o banco (tabelas e migrações idempotentes)
@@ -30,6 +31,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==================== SEGURANÇA E AUTENTICAÇÃO ====================
+
+def verificar_api_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    api_key: Optional[str] = Query(None)
+):
+    """
+    Valida a chave de autenticação para endpoints protegidos (ex: n8n Webhooks).
+    Se PIPELINE_API_KEY estiver definida no .env, a requisição deve conter o token correspondente.
+    """
+    chave_esperada = os.getenv("PIPELINE_API_KEY")
+    if chave_esperada:
+        token_fornecido = x_api_key or api_key
+        if not token_fornecido or token_fornecido.strip() != chave_esperada.strip():
+            raise HTTPException(
+                status_code=401,
+                detail="Acesso não autorizado: chave de API inválida ou ausente no cabeçalho 'X-API-Key'."
+            )
+    return True
+
 # ==================== SCHEMAS PYDANTIC ====================
 
 class TemaSchema(BaseModel):
@@ -42,17 +63,99 @@ class AderenciaUpdateSchema(BaseModel):
 class DescarteSchema(BaseModel):
     motivo: Optional[str] = Field("Fora do escopo do Metrô", description="Motivo do descarte / falso positivo para treinar a IA")
 
-# ==================== ENDPOINTS DE OPORTUNIDADES ====================
+class ExecucaoPipelineSchema(BaseModel):
+    fontes: Optional[List[str]] = Field(None, description="Fontes específicas para coletar (ex: ['finep', 'fapesp']). Se omitido, executa todas.")
+    limite_por_fonte: Optional[int] = Field(None, description="Limite máximo opcional de itens a processar por fonte.")
+    assincrono: Optional[bool] = Field(False, description="Se True, executa em background task e retorna confirmação imediata.")
+
+# ==================== ENDPOINTS DE MONITORAMENTO E SAÚDE ====================
 
 @app.get("/health")
 def health_check():
     db_mode = "PostgreSQL" if is_postgres() else "SQLite local"
-    return {"status": "ok", "message": "API está ativa.", "database": db_mode}
+    tem_auth = bool(os.getenv("PIPELINE_API_KEY"))
+    return {
+        "status": "ok",
+        "message": "API está ativa.",
+        "database": db_mode,
+        "n8n_auth_enabled": tem_auth
+    }
+
+# ==================== ORQUESTRAÇÃO DE PIPELINE (N8N) ====================
+
+@app.post("/pipeline/executar")
+def trigger_pipeline(
+    payload: Optional[ExecucaoPipelineSchema] = None,
+    background_tasks: BackgroundTasks = None,
+    auth: bool = Depends(verificar_api_key)
+):
+    """
+    Endpoint principal acionado pelo n8n (Cron Semanal ou Disparo Manual).
+    Executa a esteira completa: scrapers, filtros temáticos, análise Gemini e deduplicação.
+    Retorna o resumo com as oportunidades de alta aderência prontas para alertas.
+    """
+    fontes = payload.fontes if payload else None
+    limite = payload.limite_por_fonte if payload else None
+    assincrono = payload.assincrono if payload else False
+
+    if assincrono and background_tasks is not None:
+        background_tasks.add_task(
+            executar_pipeline_completa,
+            fontes_selecionadas=fontes,
+            limite_por_fonte=limite
+        )
+        return {
+            "status": "iniciado_em_segundo_plano",
+            "mensagem": "A pipeline de coleta foi iniciada como tarefa em segundo plano.",
+            "data_inicio": datetime.now().isoformat()
+        }
+
+    # Execução síncrona: aguarda e retorna o relatório consolidado
+    resultado = executar_pipeline_completa(
+        fontes_selecionadas=fontes,
+        limite_por_fonte=limite
+    )
+    return resultado
+
+@app.get("/pipeline/alta-aderencia")
+def listar_oportunidades_alta_aderencia(
+    dias: int = Query(7, ge=1, le=90, description="Buscar editais dos últimos X dias"),
+    auth: bool = Depends(verificar_api_key)
+):
+    """
+    Permite ao n8n consultar os editais com Alta Aderência mais recentes
+    sem a necessidade de disparar uma nova rodada de web scraping.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, titulo, instituicao, categoria, resumo, tematica, prazo, 
+                   COALESCE(aderencia_humana, aderencia) as aderencia_efetiva,
+                   justificativa_ia, link, data_coleta
+            FROM oportunidades
+            WHERE excluido IS NOT TRUE
+              AND LOWER(COALESCE(aderencia_humana, aderencia, '')) = 'alto'
+            ORDER BY id DESC
+            LIMIT 50
+        """)
+        linhas = cursor.fetchall()
+        return {
+            "total": len(linhas),
+            "periodo_dias": dias,
+            "oportunidades": [dict(r) for r in linhas]
+        }
+    finally:
+        conn.close()
+
+# ==================== ENDPOINTS DE OPORTUNIDADES ====================
 
 @app.get("/oportunidades")
 def listar_oportunidades(
     incluir_descartados: bool = False,
-    status_revisao: Optional[str] = None
+    status_revisao: Optional[str] = None,
+    aderencia: Optional[str] = None,
+    busca: Optional[str] = None
 ):
     conn = get_db_connection()
     try:
@@ -67,6 +170,19 @@ def listar_oportunidades(
         if status_revisao:
             query_conditions.append("status_revisao = %s")
             params.append(status_revisao)
+
+        if aderencia:
+            aderencia_normalizada = aderencia.strip().capitalize()
+            if aderencia_normalizada in ['Alto', 'Médio', 'Medio', 'Baixo']:
+                if aderencia_normalizada == 'Medio':
+                    aderencia_normalizada = 'Médio'
+                query_conditions.append("LOWER(COALESCE(aderencia_humana, aderencia, '')) = LOWER(%s)")
+                params.append(aderencia_normalizada)
+
+        if busca:
+            busca_param = f"%{busca.strip()}%"
+            query_conditions.append("(titulo ILIKE %s OR resumo ILIKE %s OR tematica ILIKE %s)" if is_postgres() else "(titulo LIKE %s OR resumo LIKE %s OR tematica LIKE %s)")
+            params.extend([busca_param, busca_param, busca_param])
             
         where_clause = ""
         if query_conditions:

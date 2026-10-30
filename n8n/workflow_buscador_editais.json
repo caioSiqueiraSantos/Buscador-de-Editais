@@ -1,0 +1,216 @@
+{
+  "name": "Buscador de Editais - Orquestração e Alerta Semanal",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Disparo Semanal (Segunda 08h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "node-manual-trigger",
+      "name": "Disparo Manual (Teste)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL || 'https://buscador-de-editais.onrender.com' }}/pipeline/executar",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PIPELINE_API_KEY || 'metro_inovacao_n8n_secret_2026' }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"assincrono\": false\n}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "node-http-pipeline",
+      "name": "Acionar Pipeline de Coleta e IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-alta-aderencia",
+              "leftValue": "={{ $json.total_alta_aderencia }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-tem-alta",
+      "name": "Há Oportunidades de Alta Aderência?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrai oportunidades e monta comunicado executivo formatado\nconst data = $input.first().json;\nconst editais = data.oportunidades_alta_aderencia || [];\nconst total = editais.length;\nconst frontendUrl = $env.FRONTEND_URL || 'https://buscador-de-editais-orpin.vercel.app';\nconst linkPreFiltrado = `${frontendUrl}/?aderencia=Alta`;\n\n// 1. Mensagem em Markdown (Teams / Slack / Discord)\nlet md = `### 🚨 **Novas Oportunidades de Alta Aderência Encontradas!**\\n\\n`;\nmd += `Foram identificados **${total}** edital(is) com alta relevância estratégica para a inovação.\\n\\n`;\n\neditais.forEach((item, index) => {\n  md += `**${index + 1}. ${item.titulo}**\\n`;\n  md += `🏛️ **Instituição:** ${item.instituicao || 'Não informada'} | 📂 **Tema:** ${item.tematica || 'Geral'}\\n`;\n  md += `⏳ **Prazo de Submissão:** ${item.prazo || 'Não informado'}\\n`;\n  md += `📝 **Resumo:** ${item.resumo || 'Sem resumo cadastrado.'}\\n`;\n  md += `🔗 [Acessar Link Oficial da Chamada](${item.link})\\n\\n`;\n});\n\nmd += `---\\n`;\nmd += `👉 **[Visualizar todas as oportunidades no Painel Interativo](${linkPreFiltrado})**`;\n\n// 2. Mensagem em HTML (E-mail)\nlet html = `\n<div style=\"font-family: Arial, sans-serif; color: #1e293b; max-width: 650px; margin: 0 auto;\">\n  <div style=\"background-color: #0284c7; padding: 20px; border-radius: 8px 8px 0 0; text-align: center;\">\n    <h2 style=\"color: #ffffff; margin: 0;\">🔍 Buscador de Oportunidades para Inovação</h2>\n    <p style=\"color: #e0f2fe; margin: 6px 0 0 0;\">Radar Semanal de Editais e Chamadas Públicas</p>\n  </div>\n  <div style=\"padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;\">\n    <p style=\"font-size: 15px;\">Olá equipe,</p>\n    <p style=\"font-size: 15px;\">A rodada semanal de varredura identificou <strong>${total} oportunidade(s) com Alta Aderência</strong> aos temas estratégicos cadastrados:</p>\n    <hr style=\"border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;\" />\n`;\n\neditais.forEach((item, index) => {\n  html += `\n    <div style=\"margin-bottom: 22px; padding: 16px; background-color: #f8fafc; border-left: 4px solid #0284c7; border-radius: 4px;\">\n      <h3 style=\"margin: 0 0 8px 0; color: #0f172a; font-size: 16px;\">${index + 1}. ${item.titulo}</h3>\n      <p style=\"margin: 4px 0; font-size: 13px; color: #475569;\"><strong>Instituição:</strong> ${item.instituicao} | <strong>Prazo:</strong> ${item.prazo}</p>\n      <p style=\"margin: 8px 0; font-size: 14px; color: #334155; line-height: 1.4;\">${item.resumo}</p>\n      <a href=\"${item.link}\" target=\"_blank\" style=\"color: #0284c7; text-decoration: none; font-size: 13px; font-weight: bold;\">↗ Ver edital no site oficial</a>\n    </div>\n  `;\n});\n\nhtml += `\n    <div style=\"text-align: center; margin-top: 30px;\">\n      <a href=\"${linkPreFiltrado}\" target=\"_blank\" style=\"background-color: #0284c7; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;\">Abrir Painel com Filtro de Alta Aderência</a>\n    </div>\n  </div>\n</div>\n`;\n\nreturn [{\n  json: {\n    total_alta_aderencia: total,\n    link_prefiltrado: linkPreFiltrado,\n    mensagem_markdown: md,\n    mensagem_html: html,\n    editais: editais\n  }\n}];"
+      },
+      "id": "node-format-alert",
+      "name": "Formatar Comunicado Executivo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TEAMS_WEBHOOK_URL || 'https://seu-endpoint-teams.webhook.office.com' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($json.mensagem_markdown) }}\n}",
+        "options": {}
+      },
+      "id": "node-teams-notification",
+      "name": "Notificação Microsoft Teams (Webhook)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconsole.log('Rodada concluída sem novas oportunidades de Alta Aderência nesta execução.');\nreturn [{\n  json: {\n    status: 'nenhuma_alta_aderencia',\n    data_execucao: data.data_execucao,\n    total_salvos_ia: data.total_salvos_ia || 0,\n    mensagem: 'Varredura semanal concluída. Nenhuma oportunidade inédita de Alta Aderência encontrada nesta rodada.'\n  }\n}];"
+      },
+      "id": "node-sem-novidades",
+      "name": "Registrar Rodada Sem Novidades",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        480
+      ]
+    }
+  ],
+  "connections": {
+    "Disparo Semanal (Segunda 08h)": {
+      "main": [
+        [
+          {
+            "node": "Acionar Pipeline de Coleta e IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Disparo Manual (Teste)": {
+      "main": [
+        [
+          {
+            "node": "Acionar Pipeline de Coleta e IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acionar Pipeline de Coleta e IA": {
+      "main": [
+        [
+          {
+            "node": "Há Oportunidades de Alta Aderência?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Há Oportunidades de Alta Aderência?": {
+      "main": [
+        [
+          {
+            "node": "Formatar Comunicado Executivo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar Rodada Sem Novidades",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Comunicado Executivo": {
+      "main": [
+        [
+          {
+            "node": "Notificação Microsoft Teams (Webhook)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
+

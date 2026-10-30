@@ -132,6 +132,22 @@ npm run dev
 
 ---
 
+### 3. Execução e Orquestração do n8n
+
+Para rodar o orquestrador n8n e automatizar as coletas semanais e alertas:
+
+`ash
+# Iniciar o container do n8n via Docker Compose
+docker compose -f docker-compose.n8n.yml up -d
+`
+1. Acesse o n8n no navegador em http://localhost:5678.
+2. Em **Workflows**, clique em **Import from File...** e selecione 
+8n/workflow_buscador_editais.json.
+3. O workflow já vem configurado com agendamento semanal (segundas às 08:00), chamada autenticada ao backend (POST /pipeline/executar), formatação executiva e disparo para Microsoft Teams / E-mail com links pré-filtrados.
+4. Consulte o guia detalhado em [doc/04_Guia_Integracao_N8N.md](doc/04_Guia_Integracao_N8N.md).
+
+---
+
 ## 🚀 Deploy e Infraestrutura
 
 A arquitetura desacoplada permite o deploy independente de cada componente:

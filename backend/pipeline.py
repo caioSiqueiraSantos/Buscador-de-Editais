@@ -30,8 +30,20 @@ from pydantic import BaseModel, Field
 from database import init_db, obter_temas_db, get_db_connection, obter_exemplos_aprendizado
 from scrapers.base import ItemBrutoEdital, BaseScraper
 
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=env_path)
 load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+_gemini_client = None
+
+def get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY não configurada no ambiente ou no arquivo backend/.env.")
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
 
 # ==================== SCHEMAS E ESTRUTURAS ====================
 
@@ -333,7 +345,8 @@ def analisar_com_ia(
 
     for nome_modelo in modelos_candidatos:
         try:
-            response = client.models.generate_content(
+            ai_client = get_gemini_client()
+            response = ai_client.models.generate_content(
                 model=nome_modelo,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -585,7 +598,7 @@ def processar_item_edital(
         print(f"❌ Erro ao analisar item com IA: {e}")
         return "erro", None
 
-def executar_scraper(scraper: BaseScraper, limite_itens: Optional[int] = None):
+def executar_scraper(scraper: BaseScraper, limite_itens: Optional[int] = None) -> Tuple[Dict[str, int], List[Oportunidade]]:
     """Executa a coleta e o processamento de ponta a ponta para um scraper específico."""
     print(f"\n========================================================")
     print(f"🚀 INICIANDO PIPELINE PARA FONTE: [{scraper.nome_fonte}]")
@@ -597,20 +610,24 @@ def executar_scraper(scraper: BaseScraper, limite_itens: Optional[int] = None):
     
     # 1. Coleta na fonte
     itens = scraper.coletar()
+    metricas = {"existente": 0, "recusado_prefiltro": 0, "sem_palavra_chave": 0, "salvo_ia": 0, "erro": 0}
+    itens_salvos: List[Oportunidade] = []
+
     if not itens:
         print(f"[{scraper.nome_fonte}] Nenhum item novo ou válido retornado pela coleta.")
-        return
+        return metricas, itens_salvos
 
     if limite_itens:
         itens = itens[:limite_itens]
 
     print(f"[{scraper.nome_fonte}] {len(itens)} itens prontos para passar pela esteira de filtros e IA...")
     
-    metricas = {"existente": 0, "recusado_prefiltro": 0, "sem_palavra_chave": 0, "salvo_ia": 0, "erro": 0}
     for item in itens:
         try:
-            status, _ = processar_item_edital(item, temas_ativos, exemplos_pos, exemplos_neg)
+            status, op = processar_item_edital(item, temas_ativos, exemplos_pos, exemplos_neg)
             metricas[status] = metricas.get(status, 0) + 1
+            if status == "salvo_ia" and op:
+                itens_salvos.append(op)
         except Exception as e:
             print(f"Erro inesperado no item '{item.titulo[:40]}': {e}")
             metricas["erro"] += 1
@@ -622,3 +639,83 @@ def executar_scraper(scraper: BaseScraper, limite_itens: Optional[int] = None):
     print(f"   • Já existentes no banco: {metricas['existente']}")
     if metricas['erro'] > 0:
         print(f"   • Erros de processamento: {metricas['erro']}")
+
+    return metricas, itens_salvos
+
+def executar_pipeline_completa(
+    fontes_selecionadas: Optional[List[str]] = None,
+    limite_por_fonte: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Orquestrador completo executável via CLI ou API (n8n Webhook).
+    Executa auditoria, scrapers e consolida oportunidades com alta aderência.
+    """
+    from datetime import datetime
+    from scrapers import listar_scrapers, obter_scraper
+
+    inicio = time.time()
+    init_db()
+
+    # 1. Higienização retroativa de inconsistências
+    expurgar_editais_divergentes_banco()
+
+    # 2. Scrapers selecionados
+    if fontes_selecionadas:
+        scrapers_alvo = []
+        for f in fontes_selecionadas:
+            s = obter_scraper(f)
+            if s:
+                scrapers_alvo.append(s)
+            else:
+                print(f"⚠️ Fonte '{f}' não encontrada.")
+    else:
+        scrapers_alvo = listar_scrapers()
+
+    metricas_consolidadas = {
+        "existente": 0,
+        "recusado_prefiltro": 0,
+        "sem_palavra_chave": 0,
+        "salvo_ia": 0,
+        "erro": 0
+    }
+    todas_salvas: List[Oportunidade] = []
+
+    for scraper in scrapers_alvo:
+        try:
+            m, salvos = executar_scraper(scraper, limite_itens=limite_por_fonte)
+            for k in metricas_consolidadas:
+                metricas_consolidadas[k] += m.get(k, 0)
+            todas_salvas.extend(salvos)
+        except Exception as e:
+            print(f"❌ Erro ao rodar scraper {scraper.nome_fonte}: {e}")
+            metricas_consolidadas["erro"] += 1
+
+    # Filtra oportunidades com Alta Aderência processadas nesta rodada
+    alta_aderencia_rodada = [
+        {
+            "titulo": op.titulo,
+            "instituicao": op.instituicao,
+            "categoria": op.categoria,
+            "resumo": op.resumo,
+            "tematica": op.tematica,
+            "prazo": op.prazo,
+            "aderencia": op.aderencia,
+            "justificativa_ia": op.justificativa_ia,
+            "link": op.link
+        }
+        for op in todas_salvas
+        if getattr(op, 'aderencia', '').strip().capitalize() == 'Alto' and not getattr(op, 'recusado', False)
+    ]
+
+    tempo_total = round(time.time() - inicio, 2)
+
+    return {
+        "status": "sucesso",
+        "data_execucao": datetime.now().isoformat(),
+        "duracao_segundos": tempo_total,
+        "fontes_processadas": [s.nome_fonte for s in scrapers_alvo],
+        "metricas": metricas_consolidadas,
+        "total_salvos_ia": len(todas_salvas),
+        "total_alta_aderencia": len(alta_aderencia_rodada),
+        "oportunidades_alta_aderencia": alta_aderencia_rodada
+    }
