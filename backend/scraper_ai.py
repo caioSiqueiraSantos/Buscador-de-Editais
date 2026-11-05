@@ -47,15 +47,39 @@ def executar_coleta_geral(fontes_selecionadas: List[str] = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Orquestrador Modular de Coleta e Triagem de Editais com IA")
-    parser.add_argument("--fonte", type=str, help="Executa apenas a fonte especificada (ex: finep, fapesp)")
+    parser.add_argument("--fonte", type=str, help="Executa apenas a fonte especificada (ex: finep, fapesp, cnpq)")
     parser.add_argument("--listar", action="store_true", help="Lista todas as fontes cadastradas no catálogo")
+    parser.add_argument(
+        "--testar-coleta",
+        action="store_true",
+        help="Executa apenas a coleta bruta (dry-run) para validar retorno, sem gravar no banco e sem chamar a API do Gemini"
+    )
     args = parser.parse_args()
 
     if args.listar:
         print("\n📚 Fontes registradas no catálogo de scrapers:")
         for chave, s in SCRAPERS_REGISTRY.items():
             status = "Ativo" if s.habilitado else "Desabilitado"
-            print(f"  • {chave.upper():<10} -> {s.__class__.__name__} [{status}]")
+            print(f"  • {chave.upper():<15} -> {s.__class__.__name__:<22} [{status}]")
+        sys.exit(0)
+
+    if args.testar_coleta:
+        alvos = [obter_scraper(args.fonte)] if args.fonte else list(SCRAPERS_REGISTRY.values())
+        alvos = [a for a in alvos if a is not None]
+        if not alvos:
+            print(f"⚠️ Fonte '{args.fonte}' não encontrada no catálogo.")
+            sys.exit(1)
+
+        print("\n🧪 MODO TESTE DE COLETA (DRY-RUN: Sem escrita no DB e sem chamadas ao Gemini)")
+        for s in alvos:
+            print(f"\n--------------------------------------------------------")
+            print(f"🔍 Testando Fonte: {s.nome_fonte} ({s.__class__.__name__}) | Habilitado={s.habilitado}")
+            itens = s.coletar()
+            print(f"✅ Total capturado: {len(itens)} itens")
+            for idx, it in enumerate(itens[:3], 1):
+                print(f"   [{idx}] Título: {it.titulo[:90]}")
+                print(f"       Link:   {it.link}")
+                print(f"       Prazo:  {it.prazo_proposto} | Categoria: {it.categorias}")
         sys.exit(0)
 
     fontes = [args.fonte] if args.fonte else None
