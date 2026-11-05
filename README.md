@@ -10,47 +10,47 @@ Aplicação web e pipeline de dados para busca, triagem e estruturação automat
 
 O sistema automatiza o monitoramento de fontes de fomento e parcerias tecnológicas:
 
-1. **Coleta de dados multi-fonte:** Coleta estruturada com catálogo modular (`backend/scrapers/`) cobrindo **27 instituições** mapeadas (21 fontes ativas e capturadas com sucesso em testes dry-run, e 6 mapeadas com diagnóstico de bloqueio WAF/autenticação).
-2. **Triagem temática:** Filtra chamadas com base em temas de interesse cadastrados (ex.: mobilidade sobre trilhos, hidrogênio verde, IA, MaaS), descartando itens irrelevantes antes do envio à IA para economizar requisições.
+1. **Coleta de dados multi-fonte em 2 etapas:** Coleta estruturada com catálogo modular (`backend/scrapers/`) cobrindo **27 instituições** mapeadas (20 fontes ativas com dados recentes de 2025/2026+ enriquecidos com prazo e texto completo, 1 fonte com portal defasado de 2021–2022 desabilitada por redundância com a FAPAC, e 6 mapeadas com diagnóstico de bloqueio WAF/autenticação).
+2. **Triagem temática e anti-ruído:** Filtra chamadas com base em temas de interesse cadastrados (ex.: mobilidade sobre trilhos, hidrogênio verde, IA, MaaS), descartando automaticamente resultados de editais encerrados, pautas esportivas, editais antigos (`<= 2024`) e itens divergentes antes do envio à IA para economizar requisições.
 3. **Análise com IA (Google Gemini):** Estrutura e classifica oportunidades aderentes, extraindo resumos executivos, prazos e nível de aderência (*Alto*, *Médio*, *Baixo*).
 4. **Armazenamento centralizado:** Persiste editais e temas em banco de dados PostgreSQL com controle de duplicidade.
 5. **Painel de visualização:** Interface web interativa em React para pesquisa, filtros rápidos, visualização do edital bruto e gerenciamento do CRUD de temas em tempo real.
 
 ---
 
-## 📊 Status de Mapeamento e Coleta das Fontes (27 Instituições)
+## 📊 Status de Mapeamento, Qualidade e Coleta das Fontes (27 Instituições)
 
-Abaixo está o status consolidado da implementação e validação (em modo *dry-run*, sem escrita no banco ou consumo da API Gemini) de todas as 27 instituições da planilha de mapeamento:
+Abaixo está o status consolidado da implementação, enriquecimento em 2 etapas (listagem + página interna do edital) e validação de qualidade/recência (em modo *dry-run*, sem escrita no banco ou consumo da API Gemini) de todas as 27 instituições da planilha de mapeamento:
 
-| # | Órgão / Instituição | Chave CLI (`--fonte`) | Capturado? | Itens no Teste | Método de Extração Implementado | Observações Técnicas / Pontos de Atenção |
-| :-: | :--- | :--- | :-: | :-: | :--- | :--- |
-| 1 | **FINEP** | `finep` | ✅ Sim | 18 | API REST JSON (`/o/c/chamadapublicas`) | Filtra chamadas abertas e vigentes a partir de 2025. |
-| 2 | **FAPESP** | `fapesp` | ✅ Sim | 74 | Web Scraping HTML (`fapesp.br/chamadas`) | Extrai chamadas abertas, prazos e áreas temáticas. |
-| 3 | **CNPq** | `cnpq` | ✅ Sim | 14 | Web Scraping HTML (`gov.br/cnpq/.../abertas-para-submissao`) | O legado `memoria2.cnpq.br` retorna 403; extração migrada com sucesso para o portal `gov.br/cnpq`. |
-| 4 | **CAPES** | `capes` | ✅ Sim | 32 | Web Scraping HTML (`gov.br/capes/.../editais-e-resultados-capes`) | Captura editais abertos, chamadas conjuntas e programas estratégicos. |
-| 5 | **MCTI** | `mcti` | ✅ Sim | 10 | Web Scraping HTML (`gov.br/mcti/.../noticias` e FNDCT) | A rota antiga `/chamadas-publicas` retorna 404; captura direcionada às publicações de chamadas/prêmios e FNDCT. |
-| 6 | **EMBRAPII** | `embrapii` | ✅ Sim | 47 | Híbrido: API WP-JSON + HTML (`/transparencia/#chamadas`) | Combina posts recentes de chamadas públicas com a tabela oficial de chamadas da área de Transparência. |
-| 7 | **ANPEI** | `anpei` | ✅ Sim | 7 | API REST WordPress (`/wp-json/wp/v2/posts`) | Retorna publicações institucionais e oportunidades de PD&I/fomento. |
-| 8 | **ANPROTEC** | `anprotec` | ✅ Sim | 22 | Híbrido: HTML (`/site/oportunidades/`) + WP-JSON | Excelente aderência: aba `/oportunidades/` concentra editais externos e chamadas para startups/ICTs. |
-| 9 | **FACEPE** | `facepe` | ✅ Sim | 75 | Híbrido: API WP-JSON (`www2.facepe.br`) + HTML (`/editais/todos/`) | O domínio `www.facepe.br` redireciona para `www2.facepe.br`, onde a API WP-JSON e a listagem estão abertas. |
-| 10 | **FAPAC** | `fapac` | ✅ Sim | 48 | Web Scraping HTML (`fapac.ac.gov.br/98-2/`) | **Atenção:** O domínio da planilha (`fapac.acre.gov.br`) foi desativado pelo governo; atualizado para `fapac.ac.gov.br`. |
-| 11 | **FAPDF** | `fapdf` | ✅ Sim | 24 | Web Scraping HTML (`fap.df.gov.br/chamadas-internacionais-20261` e home) | A rota genérica `/editais/` retorna 404 no Liferay; extração apontada para as páginas ativas de chamadas e documentos SEI/DODF. |
-| 12 | **FAPEAM** | `fapeam` | ✅ Sim | 4 | API Interna AJAX (`POST /wp-admin/admin-ajax.php?action=get-editais`) | A página usa Vue.js; mapeamos o endpoint POST interno consumindo as abas `editais-abertos` e `fluxo-continuo` com vigência exata. |
-| 13 | **FAPEMAT** | `fapemat` | ✅ Sim | 6 | Web Scraping HTML (`fapemat.mt.gov.br` e `/editais`) | Extrai chamadas de subvenção econômica e editais estaduais vigentes no Liferay. |
-| 14 | **FAPEMIG** | `fapemig` | ✅ Sim | 5 | Híbrido: Payload SSR (`__NUXT_DATA__`) + HTML (`/oportunidades/chamadas-e-editais`) | Novo portal em Nuxt 3; extração lê tanto os cards renderizados quanto o estado JSON SSR embutido na página. |
-| 15 | **FAPERGS** | `fapergs` | ✅ Sim | 7 | Web Scraping HTML (`fapergs.rs.gov.br/abertos` e `/inicial`) | Captura editais abertos e chamadas em destaque na página inicial. |
-| 16 | **FAPERJ** | `faperj` | ✅ Sim | 56 | Web Scraping HTML (`faperj.br/?id=28.5.7`) | Captura diretamente da Lista Oficial de Editais / Chamadas lançados em 2026 (links diretos para os PDFs dos editais). |
-| 17 | **FAPESC** | `fapesc` | ✅ Sim | 14 | Híbrido: HTML (`/chamadas-abertas/`) + API WP-JSON | Captura todas as chamadas abertas de subvenção/pesquisa em SC e publicações recentes de editais. |
-| 18 | **FUNDECT** | `fundect` | ✅ Sim | 16 | Web Scraping HTML (`fundect.ms.gov.br/informativos/consultas/`) | Extrai os editais e chamadas públicas do MS (filtrando anexos secundários). |
-| 19 | **FUNTAC** | `funtac` | ✅ Sim | 6 | Web Scraping HTML (`funtac.ac.gov.br/editais/`) | **Atenção:** Domínio corrigido de `funtac.acre.gov.br` para `funtac.ac.gov.br`. A página pública contém apenas editais históricos (2021–2022). |
-| 20 | **SENAI** | `senai` | ✅ Sim | 8 | Web Scraping HTML (`sp.senai.br/noticias`) | A rota `/inovacao` retorna 404; captura realizada via feed de notícias do SENAI-SP (hackathons, chamadas e cursos). |
-| 21 | **SESI** | `sesi` | ✅ Sim | 10 | Web Scraping HTML (`sesisp.org.br/noticias`) | Captura notícias institucionais e projetos educacionais/tecnológicos (ex.: robótica); inclui pautas esportivas que são filtradas pela pipeline. |
-| 22 | **BNDES** | `bndes` | ❌ Não | 0 | API CKAN (`dadosabertos.bndes.gov.br`) | **Ponto de Atenção:** Conexões automatizadas sofrem *Read Timeout* na porta 443 (firewall/anti-bot nos domínios `bndes.gov.br`). Desabilitado por padrão. |
-| 23 | **DESENVOLVE SP** | `desenvolve_sp` | ❌ Não | 0 | Web Scraping / WP-JSON (`desenvolvesp.com.br`) | **Ponto de Atenção:** Bloqueado por WAF/Cloudflare (**HTTP 403 Forbidden**) em todas as rotas (HTML, `/feed/` e `/wp-json/`). Requer navegador headless ou liberação de IP. |
-| 24 | **BID** | `bid` | ❌ Não | 0 | Web Scraping (`projectprocurement.iadb.org`) | **Ponto de Atenção:** Bloqueado por proteção anti-bot Akamai/Cloudflare (**HTTP 403 Forbidden**). Requer automação via navegador real (Playwright Stealth) ou API autenticada. |
-| 25 | **CAF** | `caf` | ❌ Não | 0 | Web Scraping (`caf.com/pt/sobre-a-caf/licitacoes/`) | **Ponto de Atenção:** Bloqueado por WAF/Cloudflare (**HTTP 403 Forbidden**). Requer navegador headless com resolução de desafio JS. |
-| 26 | **FIGROUP** | `figroup` | ❌ Não | 0 | Web Scraping (`financiamentodainovacao.com.br/editais/`) | **Ponto de Atenção:** O antigo blog agregador foi descontinuado e redireciona (301) para página institucional (`fi-groupbr.com`); os editais migraram para o portal fechado **FI Connect** (`connect.fi-group.com`), que exige login. |
-| 27 | **FUNDEP** | `fundep` | ❌ Não | 0 | Web Scraping (`portaldecompras.fundep.ufmg.br`) | **Ponto de Atenção:** O portal institucional não lista editais de fomento abertos no HTML, e o Portal de Compras utiliza ASP.NET WebForms (`__doPostBack`) com controle de sessão/cookies. |
+| # | Órgão / Instituição | Chave CLI (`--fonte`) | Capturado? | Itens Válidos (2025/2026+) | Com Prazo (`DD/MM/AAAA`) | Com Texto Rico (`>=150 chars`) | Método de Extração Implementado | Observações Técnicas / Pontos de Atenção |
+| :-: | :--- | :--- | :-: | :-: | :-: | :-: | :--- | :--- |
+| 1 | **FINEP** | `finep` | ✅ Sim | 18 | 100% | 100% | API REST JSON (`/o/c/chamadapublicas`) | Filtra chamadas abertas e vigentes a partir de 2025 com prazos ISO e texto integral. |
+| 2 | **FAPESP** | `fapesp` | ✅ Sim | 24 | 91,7% | 100% | Web Scraping HTML 2 Etapas (`fapesp.br/chamadas` + detalhe) | Filtra manuais fixos (IDs antigos) e visita cada chamada aberta para extrair cronograma e texto integral. |
+| 3 | **CNPq** | `cnpq` | ✅ Sim | 12 | 75,0% | 100% | Web Scraping HTML 2 Etapas (`gov.br/cnpq/.../abertas-para-submissao`) | Migrado do legado `memoria2.cnpq.br` (403) para `gov.br/cnpq`, filtrando resultados encerrados. |
+| 4 | **CAPES** | `capes` | ✅ Sim | 32 | 81,2% | 87,5% | Web Scraping HTML 2 Etapas (`gov.br/capes/.../editais-e-resultados-capes`) | Visita as páginas internas dos programas estratégicos para extrair escopo completo e prazos vigentes. |
+| 5 | **MCTI** | `mcti` | ✅ Sim | 7 | — | 100% | Web Scraping HTML 2 Etapas (`gov.br/mcti/.../noticias` e FNDCT) | Filtra estritamente notícias de chamadas, seleções, prêmios e FNDCT (descartando curiosidades científicas gerais). |
+| 6 | **EMBRAPII** | `embrapii` | ✅ Sim | 15 | 66,7% | 100% | Híbrido: API WP-JSON + HTML 2 Etapas (`/transparencia/`) | Filtra chamadas históricas encerradas (2016–2024) e retém apenas chamadas abertas/recentes (2025/2026+). |
+| 7 | **ANPEI** | `anpei` | ✅ Sim | 6 | — | 66,7% | API REST WordPress (`/wp-json/wp/v2/posts`) | Extrai `content.rendered` completo das publicações de PD&I e fomento empresarial. |
+| 8 | **ANPROTEC** | `anprotec` | ✅ Sim | 22 | 100% | 100% | Híbrido: HTML 2 Etapas (`/site/oportunidades/`) + WP-JSON | Visita cada oportunidade publicada para extrair o corpo completo e datas limite. |
+| 9 | **FACEPE** | `facepe` | ✅ Sim | 57 | 70,2% | 15,8%* | Híbrido: API WP-JSON (`www2.facepe.br`) + HTML (`/editais/todos/`) | Filtra resultados preliminares/finais e editais `<= 2024`. *(Itens da tabela HTML apontam direto para PDF).* |
+| 10 | **FAPAC** | `fapac` | ✅ Sim | 30 | 3,3%* | 100% | Web Scraping HTML (`fapac.ac.gov.br/98-2/`) | Domínio atualizado de `fapac.acre.gov.br` para `fapac.ac.gov.br`; filtra atas, comissões e resultados encerrados. |
+| 11 | **FAPDF** | `fapdf` | ✅ Sim | 16 | —* | 100% | Web Scraping HTML 2 Etapas (`fap.df.gov.br/chamadas-internacionais-20261`) | Filtra extratos de resultados encerrados e anos `<= 2024` (links diretos para PDFs no SEI/DODF). |
+| 12 | **FAPEAM** | `fapeam` | ✅ Sim | 4 | 100% | 100% | API Interna AJAX (`POST /wp-admin/admin-ajax.php?action=get-editais`) + HTML | Consome as abas `editais-abertos` e `fluxo-continuo` com vigência exata e enriquece o texto na página do edital. |
+| 13 | **FAPEMAT** | `fapemat` | ✅ Sim | 3 | 66,7% | 100% | Web Scraping HTML 2 Etapas (`fapemat.mt.gov.br` e `/editais`) | Filtra resultados finais/preliminares e enriquece o corpo completo das chamadas vigentes. |
+| 14 | **FAPEMIG** | `fapemig` | ✅ Sim | 4 | —* | 100% | Híbrido: Payload SSR (`__NUXT_DATA__`) + HTML 2 Etapas | Deduplica chamadas entre SSR e HTML e extrai o escopo completo das oportunidades abertas. |
+| 15 | **FAPERGS** | `fapergs` | ✅ Sim | 6 | —* | 100% | Web Scraping HTML 2 Etapas (`fapergs.rs.gov.br/abertos` e `/inicial`) | Remove resultados preliminares e imagens de banner, enriquecendo o texto dos editais abertos. |
+| 16 | **FAPERJ** | `faperj` | ✅ Sim | 56 | 98,2% | 100% | Web Scraping HTML (`faperj.br/?id=28.5.7`) | Extrai títulos reais e prazos por extenso diretamente da Lista Oficial de Editais 2025/2026. |
+| 17 | **FAPESC** | `fapesc` | ✅ Sim | 10 | 50,0% | 90,0% | Híbrido: HTML 2 Etapas (`/chamadas-abertas/`) + API WP-JSON | Filtra resultados de mérito/admissibilidade e retém apenas chamadas abertas vigentes. |
+| 18 | **FUNDECT** | `fundect` | ✅ Sim | 16 | 25,0% | 100% | Web Scraping HTML (`fundect.ms.gov.br/informativos/consultas/`) | Filtra chamadas antigas (`<= 2024`) e anexos secundários, retendo os editais principais do MS. |
+| 19 | **SENAI** | `senai` | ✅ Sim | 6 | 16,7% | 100% | Web Scraping HTML 2 Etapas (`sp.senai.br/noticias`) | Filtra homenagens institucionais e enriquece o texto completo de hackathons, cursos e chamadas tecnológicas. |
+| 20 | **SESI** | `sesi` | ✅ Sim | 1 | 100% | 100% | Web Scraping HTML 2 Etapas (`sesisp.org.br/noticias`) | Filtra 100% das pautas esportivas (Vôlei, Judô, Rugby, Basquete), retendo apenas educação/robótica. |
+| 21 | **FUNTAC** | `funtac` | ⚠️ Histórico | 0 *(6 de 2021–22)* | — | — | Web Scraping HTML (`funtac.ac.gov.br/editais/`) | **Desabilitado por padrão:** O portal da FUNTAC contém apenas PDFs antigos (2021–2022); os editais atuais do Acre (2025/2026) estão centralizados na **FAPAC**. |
+| 22 | **BNDES** | `bndes` | ❌ Não | 0 | — | — | API CKAN (`dadosabertos.bndes.gov.br`) | **Ponto de Atenção:** Conexões automatizadas sofrem *Read Timeout* na porta 443 (firewall/anti-bot nos domínios `bndes.gov.br`). Desabilitado por padrão. |
+| 23 | **DESENVOLVE SP** | `desenvolve_sp` | ❌ Não | 0 | — | — | Web Scraping / WP-JSON (`desenvolvesp.com.br`) | **Ponto de Atenção:** Bloqueado por WAF/Cloudflare (**HTTP 403 Forbidden**) em todas as rotas. Requer navegador headless ou liberação de IP. |
+| 24 | **BID** | `bid` | ❌ Não | 0 | — | — | Web Scraping (`projectprocurement.iadb.org`) | **Ponto de Atenção:** Bloqueado por proteção anti-bot Akamai/Cloudflare (**HTTP 403 Forbidden**). Requer automação via navegador real (Playwright Stealth). |
+| 25 | **CAF** | `caf` | ❌ Não | 0 | — | — | Web Scraping (`caf.com/pt/sobre-a-caf/licitacoes/`) | **Ponto de Atenção:** Bloqueado por WAF/Cloudflare (**HTTP 403 Forbidden**). Requer navegador headless com resolução de desafio JS. |
+| 26 | **FIGROUP** | `figroup` | ❌ Não | 0 | — | — | Web Scraping (`financiamentodainovacao.com.br/editais/`) | **Ponto de Atenção:** O antigo blog agregador redireciona (301) para página institucional (`fi-groupbr.com`); os editais migraram para o portal fechado **FI Connect** (`connect.fi-group.com`), que exige login. |
+| 27 | **FUNDEP** | `fundep` | ❌ Não | 0 | — | — | Web Scraping (`portaldecompras.fundep.ufmg.br`) | **Ponto de Atenção:** O portal institucional não lista editais de fomento abertos no HTML, e o Portal de Compras utiliza ASP.NET WebForms (`__doPostBack`) com controle de sessão. |
 
 ---
 

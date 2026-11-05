@@ -122,18 +122,35 @@ TERMOS_SALVAGUARDA_METRO = [
 def verificar_divergencia_sumaria(bloco_enriquecido: dict) -> Tuple[bool, str]:
     """
     Tier 1 - Heurística de Pré-Filtro (Zero Token Waste):
-    Detecta editais com divergência extrema e inequívoca (ex.: agronegócio puro, defensivos, colheita)
-    que não contenham nenhuma correlação com sistemas metroferroviários ou mobilidade.
+    Detecta editais com divergência extrema e inequívoca (ex.: agronegócio puro, defensivos, colheita,
+    resultados de editais já encerrados ou notícias esportivas) que não contenham nenhuma correlação
+    com sistemas metroferroviários ou mobilidade urbana.
     """
+    titulo_norm = normalizar_texto(bloco_enriquecido.get('titulo', ''))
     todos_textos = f"{bloco_enriquecido.get('titulo', '')} {bloco_enriquecido.get('categorias', '')} {bloco_enriquecido.get('descricaoRawText', '')}"
     texto_norm = normalizar_texto(todos_textos)
-    
-    # Se mencionar explicitamente modais ou tecnologias metroviárias, não recusa sumariamente
+
+    # 1. Descarta imediatamente publicações de Resultados Preliminares/Finais, Homologações ou Comissões (fases encerradas)
+    padroes_encerrados = [
+        r'\bresultado\s+(preliminar|final|parcial|de\s+merito|do\s+julgamento|da\s+etapa)',
+        r'\bextrato\s+d[eo]\s+resultado\b',
+        r'\b(divulga|divulgado|anuncia|confira\s+o)\s+resultado\b',
+        r'\bcomissao\s+de\s+(selecao|julgamento|avaliacao)',
+    ]
+    for pat in padroes_encerrados:
+        if re.search(pat, titulo_norm):
+            return True, "Publicação de resultado/homologação de chamada já encerrada (não é oportunidade aberta)."
+
+    # 2. Descarta notícias esportivas
+    if re.search(r'\b(superliga|volei|judo|rugby|basquete|nbb|grand\s+slam)\b', titulo_norm):
+        return True, "Notícia esportiva sem relação com editais de fomento ou PD&I."
+
+    # 3. Se mencionar explicitamente modais ou tecnologias metroviárias, não recusa sumariamente
     for termo_salvo in TERMOS_SALVAGUARDA_METRO:
         if termo_salvo in texto_norm:
             return False, ""
             
-    # Procura termos estritamente divergentes
+    # 4. Procura termos estritamente divergentes (agronegócio / commodities)
     for termo_div in TERMOS_RECUSA_DIVERGENCIA:
         padrao = r'\b' + re.escape(termo_div) + r'\b'
         if re.search(padrao, texto_norm):
@@ -179,15 +196,40 @@ def salvar_recusado_prefiltro(titulo: str, link: str, motivo: str, instituicao: 
 
 def contem_palavra_chave(item_json: dict, temas: list[str]) -> Tuple[bool, str]:
     """
-    Tier 2: Verifica se o conteúdo do item contém ao menos um dos temas/palavras-chave cadastradas no banco.
+    Tier 2: Verifica se o conteúdo do item contém ao menos um dos temas/palavras-chave cadastradas no banco,
+    evitando falsos positivos em palavras isoladas polissêmicas (ex.: 'materiais permanentes', 'mobilidade acadêmica').
     """
     if not temas:
         return True, "Todos os temas (banco sem restrições)"
     
-    todos_textos = " ".join(extrair_valores_texto(item_json))
+    # Avalia título e descrição do edital (sem contaminar pelo nome genérico da instituição no campo categorias)
+    if isinstance(item_json, dict) and ('titulo' in item_json or 'descricaoRawText' in item_json):
+        todos_textos = f"{item_json.get('titulo', '')} {item_json.get('descricaoRawText', '')} {item_json.get('descricao', '')}"
+    else:
+        todos_textos = " ".join(extrair_valores_texto(item_json))
     texto_normalizado = normalizar_texto(todos_textos)
     
-    stop_words = {'para', 'sobre', 'como', 'com', 'sem', 'dos', 'das', 'uma', 'uns', 'umas', 'que', 'service'}
+    # Palavras isoladas genéricas/ambíguas que só devem dar match quando fizerem parte de um subtermo composto
+    # (ex.: 'materiais avancados', 'industria 4.0', 'mobilidade urbana', 'energias renovaveis')
+    stop_words = {
+        'para', 'sobre', 'como', 'com', 'sem', 'dos', 'das', 'uma', 'uns', 'umas', 'que',
+        'service', 'materiais', 'material', 'industria', 'industrial', 'industriais',
+        'urbana', 'urbano', 'verde', 'avancados', 'avancadas', 'inteligencia', 'artificial',
+        'mobility', 'mobilidade', 'transporte', 'energia', 'energias', 'renovaveis'
+    }
+
+    # Descarta falso positivo de 'mobilidade acadêmica / intercâmbio estudantil' quando não há relação urbana/transporte
+    eh_intercambio_academico = any(
+        termo_acad in texto_normalizado
+        for termo_acad in [
+            'mobilidade academica', 'mobilidade internacional de', 'mobilidade de pesquisadores',
+            'instalacao de pesquisadores', 'estagio de pesquisa no exterior', 'mobility confap',
+            'confap wbi', 'doutorado sanduiche'
+        ]
+    ) and not any(
+        termo_urb in texto_normalizado
+        for termo_urb in ['mobilidade urbana', 'transporte publico', 'ferrovi', 'metrovi', 'trilhos', 'passageiros']
+    )
 
     for tema in temas:
         tema_norm = normalizar_texto(tema).strip()
@@ -198,17 +240,61 @@ def contem_palavra_chave(item_json: dict, temas: list[str]) -> Tuple[bool, str]:
         if tema_norm in texto_normalizado:
             return True, tema
         
-        # 2. Correspondência por subtermos significativos
+        # 2. Correspondência por subtermos compostos significativos (ex: 'mobilidade urbana', 'inteligencia artificial')
         subtermos = re.split(r'[,;()\/]|\be\b|\bou\b', tema_norm)
         for sub in subtermos:
             sub_limpo = sub.strip()
-            if len(sub_limpo) >= 3 and sub_limpo in texto_normalizado:
+            if len(sub_limpo) >= 3 and re.search(r'\b' + re.escape(sub_limpo) + r'\b', texto_normalizado):
+                if sub_limpo in ['mobilidade', 'mobility'] and eh_intercambio_academico:
+                    continue
                 return True, f"{tema} (termo: {sub_limpo})"
             
-            # 3. Correspondência por palavras individuais relevantes do tema
+            # 3. Correspondência por palavras individuais de alta especificidade (ex: 'trilhos', 'blockchain', 'hidrogenio')
             for palavra in sub_limpo.split():
-                if len(palavra) >= 4 and palavra not in stop_words and palavra in texto_normalizado:
-                    return True, f"{tema} (palavra: {palavra})"
+                if len(palavra) >= 4 and palavra not in stop_words:
+                    if re.search(r'\b' + re.escape(palavra) + r'\b', texto_normalizado):
+                        return True, f"{tema} (palavra: {palavra})"
+
+    # 4. Sinônimos técnicos diretos de alta relevância para o ecossistema Metrô/NIT
+    sinonimos_tecnicos = [
+        ('mobilidade eletrica', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('transporte coletivo', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('transporte ferroviario', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('metroferroviario', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('bilhetagem', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('visao computacional', 'Indústria 4.0 e Inteligência Artificial'),
+        ('internet das coisas', 'Indústria 4.0 e Inteligência Artificial'),
+        ('gemeos digitais', 'Indústria 4.0 e Inteligência Artificial'),
+        ('digital twin', 'Indústria 4.0 e Inteligência Artificial'),
+        ('ciberseguranca', 'Indústria 4.0 e Inteligência Artificial'),
+        ('seguranca de dados', 'Indústria 4.0 e Inteligência Artificial'),
+        ('manufatura avancada', 'Indústria 4.0 e Inteligência Artificial'),
+        ('robotica', 'Indústria 4.0 e Inteligência Artificial'),
+        ('semicondutores', 'Indústria 4.0 e Inteligência Artificial'),
+        ('tecnologias digitais', 'Indústria 4.0 e Inteligência Artificial'),
+        ('plataformas digitais', 'Indústria 4.0 e Inteligência Artificial'),
+        ('desafios digitais', 'Indústria 4.0 e Inteligência Artificial'),
+        ('industria do futuro', 'Indústria 4.0 e Inteligência Artificial'),
+        ('industria rj 4.0', 'Indústria 4.0 e Inteligência Artificial'),
+        ('inovacao aberta', 'Indústria 4.0 e Inteligência Artificial'),
+        ('cidades inteligentes', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('smart cities', 'Mobilidade urbana e transporte sobre trilhos'),
+        ('transicao energetica', 'Hidrogênio verde e Energias renováveis'),
+        ('eficiencia energetica', 'Hidrogênio verde e Energias renováveis'),
+        ('energia limpa', 'Hidrogênio verde e Energias renováveis'),
+        ('armazenamento de energia', 'Hidrogênio verde e Energias renováveis'),
+        ('baterias', 'Hidrogênio verde e Energias renováveis'),
+        ('descarbonizacao', 'Hidrogênio verde e Energias renováveis'),
+        ('economia circular', 'Hidrogênio verde e Energias renováveis'),
+        ('novos materiais', 'Blockchain e Materiais avançados'),
+        ('materiais compositos', 'Blockchain e Materiais avançados'),
+        ('raw materials', 'Blockchain e Materiais avançados'),
+        ('m-era.net', 'Blockchain e Materiais avançados'),
+        ('nanotecnologia', 'Blockchain e Materiais avançados'),
+    ]
+    for termo_sin, tema_assoc in sinonimos_tecnicos:
+        if re.search(r'\b' + re.escape(termo_sin) + r'\b', texto_normalizado):
+            return True, f"{tema_assoc} (termo técnico: {termo_sin})"
                 
     return False, ""
 

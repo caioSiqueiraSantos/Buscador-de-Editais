@@ -13,7 +13,13 @@ import requests
 import urllib3
 from typing import List
 from bs4 import BeautifulSoup
-from scrapers.base import BaseScraper, ItemBrutoEdital
+from scrapers.base import (
+    BaseScraper,
+    ItemBrutoEdital,
+    eh_item_ruido_ou_encerrado,
+    extrair_prazo_universal,
+    enriquecer_itens_via_html,
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -32,16 +38,7 @@ def _limpar_html(texto_html: str) -> str:
 
 
 def _extrair_prazo_texto(texto: str) -> str:
-    if not texto:
-        return "Não informado"
-    m = re.search(
-        r'(?:inscri[cç][oõ]es\s*(?:v[aã]o\s*)?at[eé]|prazo|submiss[aã]o|at[eé])\s*:?\s*(\d{1,2}[\/\-\.]\d{1,2}(?:[\/\-\.]\d{2,4})?)',
-        texto,
-        re.IGNORECASE
-    )
-    if m:
-        return m.group(1)
-    return "Não informado"
+    return extrair_prazo_universal(texto)
 
 
 class CnpqScraper(BaseScraper):
@@ -99,12 +96,16 @@ class CnpqScraper(BaseScraper):
                 # Remove prefixo "Saiba mais sobre " se presente
                 titulo_limpo = re.sub(r'^Saiba mais sobre\s+', '', titulo, flags=re.IGNORECASE).strip()
 
+                bloco_pai = a.find_parent(['div', 'li', 'article'])
+                contexto = bloco_pai.get_text(" ", strip=True) if bloco_pai else titulo_limpo
+
+                if eh_item_ruido_ou_encerrado(titulo_limpo, href, contexto):
+                    continue
+
                 if href in links_vistos:
                     continue
                 links_vistos.add(href)
 
-                bloco_pai = a.find_parent(['div', 'li', 'article'])
-                contexto = bloco_pai.get_text(" ", strip=True) if bloco_pai else titulo_limpo
                 prazo = _extrair_prazo_texto(contexto)
 
                 itens.append(ItemBrutoEdital(
@@ -116,6 +117,7 @@ class CnpqScraper(BaseScraper):
                     categorias="CNPq - Chamadas Públicas e Fomento"
                 ))
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=20)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} chamadas encontradas.")
         return itens
 
@@ -164,12 +166,15 @@ class CapesScraper(BaseScraper):
             if not eh_relevante:
                 continue
 
+            pai = a.find_parent(['li', 'div', 'p'])
+            contexto = pai.get_text(" ", strip=True) if pai else titulo
+
+            if eh_item_ruido_ou_encerrado(titulo, href, contexto):
+                continue
+
             if href in links_vistos:
                 continue
             links_vistos.add(href)
-
-            pai = a.find_parent(['li', 'div', 'p'])
-            contexto = pai.get_text(" ", strip=True) if pai else titulo
 
             itens.append(ItemBrutoEdital(
                 titulo=titulo,
@@ -180,6 +185,7 @@ class CapesScraper(BaseScraper):
                 categorias="CAPES - Editais e Programas de Pós-Graduação/Pesquisa"
             ))
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=35)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} editais/programas encontrados.")
         return itens
 
@@ -187,7 +193,7 @@ class CapesScraper(BaseScraper):
 class MctiScraper(BaseScraper):
     """
     Scraper para o Ministério da Ciência, Tecnologia e Inovação (MCTI).
-    Monitora notícias de chamadas/prêmios/seleções e páginas de fomento do MCTI.
+    Monitora estritamente notícias de chamadas, editais, prêmios, seleções e fomento do MCTI.
     """
 
     @property
@@ -201,6 +207,12 @@ class MctiScraper(BaseScraper):
         ]
         itens: List[ItemBrutoEdital] = []
         links_vistos = set()
+
+        termos_oportunidade = [
+            'edital', 'chamada', 'seleção', 'selecao', 'inscrições', 'inscricoes',
+            'prêmio', 'premio', 'subvenção', 'subvencao', 'fndct', 'bolsa',
+            'fomento', 'financiamento', 'hackathon', 'oportunidade', 'propostas'
+        ]
 
         for url in urls:
             print(f"[{self.nome_fonte}] Consultando portal MCTI: {url} ...")
@@ -227,20 +239,20 @@ class MctiScraper(BaseScraper):
                 if href.rstrip('/') == 'https://www.gov.br/mcti/pt-br':
                     continue
 
-                # Filtra publicações datadas e chamadas/editais do MCTI
-                eh_oportunidade = (
-                    re.search(r'/noticias/202\d/', href.lower()) is not None
-                    or any(w in titulo.lower() for w in ['edital', 'chamada', 'selecion', 'prêmio', 'premio', 'subven', 'fndct', 'bolsa'])
-                )
+                pai = a.find_parent(['article', 'li', 'div'])
+                contexto = pai.get_text(" ", strip=True) if pai else titulo
+
+                # Exige que a publicação mencione termos reais de oportunidade/fomento (evitando curiosidades científicas gerais)
+                eh_oportunidade = any(w in (titulo + " " + contexto[:250]).lower() for w in termos_oportunidade)
                 if not eh_oportunidade:
+                    continue
+
+                if eh_item_ruido_ou_encerrado(titulo, href, contexto):
                     continue
 
                 if href in links_vistos:
                     continue
                 links_vistos.add(href)
-
-                pai = a.find_parent(['article', 'li', 'div'])
-                contexto = pai.get_text(" ", strip=True) if pai else titulo
 
                 itens.append(ItemBrutoEdital(
                     titulo=titulo,
@@ -251,6 +263,7 @@ class MctiScraper(BaseScraper):
                     categorias="MCTI - Fomento e Políticas de CT&I"
                 ))
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=15)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} itens encontrados.")
         return itens
 
@@ -258,7 +271,7 @@ class MctiScraper(BaseScraper):
 class EmbrapiiScraper(BaseScraper):
     """
     Scraper para a EMBRAPII (Empresa Brasileira de Pesquisa e Inovação Industrial).
-    Combina a API WP-JSON de publicações/chamadas com a listagem de Chamadas Públicas da página de Transparência.
+    Combina a API WP-JSON de chamadas/oportunidades com as Chamadas Públicas recentes (2025/2026+).
     """
 
     @property
@@ -269,8 +282,13 @@ class EmbrapiiScraper(BaseScraper):
         itens: List[ItemBrutoEdital] = []
         links_vistos = set()
 
-        # 1. Consulta WP-JSON API para notícias recentes de chamadas e parcerias
-        url_api = "https://embrapii.org.br/wp-json/wp/v2/posts?per_page=15"
+        termos_fomento = [
+            'chamada', 'edital', 'lança', 'lanca', 'inscri', 'seleção', 'selecao',
+            'milhões', 'milhoes', 'fomento', 'aport', 'evento', 'gratuito', 'propostas'
+        ]
+
+        # 1. Consulta WP-JSON API para notícias recentes de chamadas, eventos e parcerias
+        url_api = "https://embrapii.org.br/wp-json/wp/v2/posts?per_page=20"
         print(f"[{self.nome_fonte}] Consultando API WP-JSON: {url_api} ...")
         try:
             resp = requests.get(url_api, headers=DEFAULT_HEADERS, timeout=15, verify=False)
@@ -279,26 +297,32 @@ class EmbrapiiScraper(BaseScraper):
                 for post in posts:
                     titulo = _limpar_html(post.get('title', {}).get('rendered', ''))
                     link = post.get('link', '').strip()
-                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', '')) or _limpar_html(post.get('content', {}).get('rendered', ''))
+                    corpo_completo = _limpar_html(post.get('content', {}).get('rendered', ''))
+                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', ''))
+                    texto_desc = corpo_completo if len(corpo_completo) > len(resumo) else resumo
                     data_pub = (post.get('date') or '')[:10]
 
                     if not titulo or not link or link in links_vistos:
                         continue
-                    links_vistos.add(link)
+                    if not any(w in (titulo + " " + resumo).lower() for w in termos_fomento):
+                        continue
+                    if eh_item_ruido_ou_encerrado(titulo, link, texto_desc):
+                        continue
 
+                    links_vistos.add(link)
                     itens.append(ItemBrutoEdital(
                         titulo=titulo,
-                        descricao=resumo[:1500] if resumo else titulo,
+                        descricao=texto_desc[:2000] if texto_desc else titulo,
                         instituicao=self.nome_fonte,
                         link=link,
                         vigencia_inicio=data_pub or "Não informada",
-                        prazo_proposto=_extrair_prazo_texto(resumo),
-                        categorias="EMBRAPII - Inovação Industrial"
+                        prazo_proposto=_extrair_prazo_texto(texto_desc),
+                        categorias="EMBRAPII - Chamadas e Parcerias PD&I"
                     ))
         except Exception as e:
             print(f"[{self.nome_fonte}] Aviso ao consultar WP-JSON: {e}")
 
-        # 2. Consulta listagem de Chamadas Públicas na página inicial e Transparência
+        # 2. Consulta listagem de Chamadas Públicas recentes (2025/2026+)
         for url_html in ["https://embrapii.org.br/", "https://embrapii.org.br/transparencia/"]:
             print(f"[{self.nome_fonte}] Consultando chamadas públicas em: {url_html} ...")
             try:
@@ -320,7 +344,6 @@ class EmbrapiiScraper(BaseScraper):
                     pai = a.find_parent(['div', 'li', 'tr', 'article'])
                     contexto = pai.get_text(" ", strip=True) if pai else texto_link
 
-                    # Quando o texto do botão é 'Ver documentos', extrai o título do contexto ou do slug da URL
                     if not texto_link or texto_link.lower() in ['ver documentos', 'saiba mais', 'acesse']:
                         titulo_limpo = re.sub(r'\s*Ver documentos.*$', '', contexto, flags=re.IGNORECASE).strip()
                         if len(titulo_limpo) < 10 or len(titulo_limpo) > 180:
@@ -328,6 +351,12 @@ class EmbrapiiScraper(BaseScraper):
                             titulo_limpo = slug.replace('-', ' ').upper()
                     else:
                         titulo_limpo = texto_link
+
+                    # Na página de transparência, descarta chamadas antigas (2016 a 2024) ou já encerradas
+                    if eh_item_ruido_ou_encerrado(titulo_limpo, href, contexto):
+                        continue
+                    if 'encerrad' in contexto.lower():
+                        continue
 
                     links_vistos.add(href)
                     itens.append(ItemBrutoEdital(
@@ -341,6 +370,7 @@ class EmbrapiiScraper(BaseScraper):
             except Exception as e:
                 print(f"[{self.nome_fonte}] Erro ao acessar {url_html}: {e}")
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=15)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} itens encontrados.")
         return itens
 

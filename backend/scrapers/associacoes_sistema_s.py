@@ -15,7 +15,13 @@ import requests
 import urllib3
 from typing import List
 from bs4 import BeautifulSoup
-from scrapers.base import BaseScraper, ItemBrutoEdital
+from scrapers.base import (
+    BaseScraper,
+    ItemBrutoEdital,
+    eh_item_ruido_ou_encerrado,
+    extrair_prazo_universal,
+    enriquecer_itens_via_html,
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -34,22 +40,13 @@ def _limpar_html(texto_html: str) -> str:
 
 
 def _extrair_prazo(texto: str) -> str:
-    if not texto:
-        return "Não informado"
-    m = re.search(
-        r'(?:at[eé]|prazo|inscri[cç][oõ]es\s*at[eé])\s*:?\s*(\d{1,2}[\/\-\.]\d{1,2}(?:[\/\-\.]\d{2,4})?)',
-        texto,
-        re.IGNORECASE
-    )
-    if m:
-        return m.group(1)
-    return "Não informado"
+    return extrair_prazo_universal(texto)
 
 
 class AnpeiScraper(BaseScraper):
     """
     Scraper para a ANPEI.
-    Consome a API REST WordPress (/wp-json/wp/v2/posts) com fallback para o Feed RSS (/feed/).
+    Consome a API REST WordPress (/wp-json/wp/v2/posts) extraindo o conteúdo completo das publicações.
     """
 
     @property
@@ -68,20 +65,24 @@ class AnpeiScraper(BaseScraper):
                 for post in resp.json():
                     titulo = _limpar_html(post.get('title', {}).get('rendered', ''))
                     link = (post.get('link') or '').strip()
-                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', '')) or _limpar_html(post.get('content', {}).get('rendered', ''))
+                    corpo = _limpar_html(post.get('content', {}).get('rendered', ''))
+                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', ''))
+                    texto_desc = corpo if len(corpo) > len(resumo) else resumo
                     data_pub = (post.get('date') or '')[:10]
 
                     if not titulo or not link or link in links_vistos:
+                        continue
+                    if eh_item_ruido_ou_encerrado(titulo, link, texto_desc):
                         continue
                     links_vistos.add(link)
 
                     itens.append(ItemBrutoEdital(
                         titulo=titulo,
-                        descricao=resumo[:1500] if resumo else titulo,
+                        descricao=texto_desc[:2000] if texto_desc else titulo,
                         instituicao=self.nome_fonte,
                         link=link,
                         vigencia_inicio=data_pub or "Não informada",
-                        prazo_proposto=_extrair_prazo(resumo),
+                        prazo_proposto=_extrair_prazo(texto_desc),
                         categorias="ANPEI - PD&I e Fomento Empresarial"
                     ))
         except Exception as e:
@@ -94,7 +95,8 @@ class AnpeiScraper(BaseScraper):
 class AnprotecScraper(BaseScraper):
     """
     Scraper para a ANPROTEC.
-    Coleta diretamente da aba dedicada de Oportunidades (/site/oportunidades/) e da API WP-JSON.
+    Coleta diretamente da aba dedicada de Oportunidades (/site/oportunidades/) e da API WP-JSON,
+    enriquecendo o corpo completo e os prazos de cada oportunidade em 2 etapas.
     """
 
     @property
@@ -121,12 +123,15 @@ class AnprotecScraper(BaseScraper):
                     continue
                 if not titulo or titulo.lower() in ['leia mais', 'saiba mais'] or len(titulo) < 15:
                     continue
-                if href in links_vistos:
-                    continue
-                links_vistos.add(href)
 
                 pai = a.find_parent(['article', 'div', 'li'])
                 contexto = pai.get_text(" ", strip=True) if pai else titulo
+
+                if eh_item_ruido_ou_encerrado(titulo, href, contexto):
+                    continue
+                if href in links_vistos:
+                    continue
+                links_vistos.add(href)
 
                 itens.append(ItemBrutoEdital(
                     titulo=titulo,
@@ -139,7 +144,7 @@ class AnprotecScraper(BaseScraper):
         except Exception as e:
             print(f"[{self.nome_fonte}] Erro em {url_op}: {e}")
 
-        # 2. Complemento via API WP-JSON
+        # 2. Complemento via API WP-JSON (usa content.rendered completo)
         url_api = "https://anprotec.org.br/site/wp-json/wp/v2/posts?per_page=10"
         try:
             resp = requests.get(url_api, headers=DEFAULT_HEADERS, timeout=15, verify=False)
@@ -147,22 +152,28 @@ class AnprotecScraper(BaseScraper):
                 for post in resp.json():
                     titulo = _limpar_html(post.get('title', {}).get('rendered', ''))
                     link = (post.get('link') or '').strip()
-                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', '')) or _limpar_html(post.get('content', {}).get('rendered', ''))
+                    corpo = _limpar_html(post.get('content', {}).get('rendered', ''))
+                    resumo = _limpar_html(post.get('excerpt', {}).get('rendered', ''))
+                    texto_desc = corpo if len(corpo) > len(resumo) else resumo
                     if not titulo or not link or link in links_vistos:
+                        continue
+                    if eh_item_ruido_ou_encerrado(titulo, link, texto_desc):
                         continue
                     links_vistos.add(link)
                     itens.append(ItemBrutoEdital(
                         titulo=titulo,
-                        descricao=resumo[:1500] if resumo else titulo,
+                        descricao=texto_desc[:2000] if texto_desc else titulo,
                         instituicao=self.nome_fonte,
                         link=link,
                         vigencia_inicio=(post.get('date') or '')[:10],
-                        prazo_proposto=_extrair_prazo(resumo),
+                        prazo_proposto=_extrair_prazo(texto_desc),
                         categorias="ANPROTEC - Notícias e Chamadas"
                     ))
         except Exception as e:
             print(f"[{self.nome_fonte}] Aviso WP-JSON: {e}")
 
+        # Etapa 2: Enriquece páginas HTML da aba Oportunidades para obter texto completo e prazo
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=25)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} oportunidades encontradas.")
         return itens
 
@@ -170,7 +181,7 @@ class AnprotecScraper(BaseScraper):
 class SenaiScraper(BaseScraper):
     """
     Scraper para o SENAI-SP (sp.senai.br/noticias).
-    Extrai notícias de inovação, hackathons, cursos e chamadas tecnológicas.
+    Extrai notícias de inovação, hackathons, cursos e chamadas tecnológicas, enriquecendo o corpo completo.
     """
 
     @property
@@ -199,9 +210,7 @@ class SenaiScraper(BaseScraper):
 
                 if href in links_vistos:
                     continue
-                links_vistos.add(href)
 
-                # Extrai data inicial (ex: "04/11/2026 Título Descrição ...")
                 data_pub = "Não informada"
                 m_data = re.match(r'^(\d{2}/\d{2}/\d{4})\s+(.*)', texto)
                 if m_data:
@@ -214,6 +223,10 @@ class SenaiScraper(BaseScraper):
                 titulo = partes[0].strip()
                 descricao = partes[1].strip() if (len(partes) > 1 and partes[1].strip()) else titulo
 
+                if eh_item_ruido_ou_encerrado(titulo, href, descricao):
+                    continue
+
+                links_vistos.add(href)
                 itens.append(ItemBrutoEdital(
                     titulo=titulo[:200],
                     descricao=descricao[:1500],
@@ -221,11 +234,12 @@ class SenaiScraper(BaseScraper):
                     link=href,
                     vigencia_inicio=data_pub,
                     prazo_proposto=_extrair_prazo(descricao),
-                    categorias="SENAI-SP - Inovação e Tecnologia Industrial"
+                    categorias="SENAI-SP - Editais, Cursos e Inovação Tecnológica"
                 ))
         except Exception as e:
             print(f"[{self.nome_fonte}] Erro ao acessar {url}: {e}")
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=12)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} itens encontrados.")
         return itens
 
@@ -233,7 +247,7 @@ class SenaiScraper(BaseScraper):
 class SesiScraper(BaseScraper):
     """
     Scraper para o SESI-SP (sesisp.org.br/noticias).
-    Extrai chamadas, processos seletivos e notícias institucionais.
+    Extrai chamadas, competições educacionais/robótica e projetos de inovação, filtrando notícias de esporte.
     """
 
     @property
@@ -262,7 +276,6 @@ class SesiScraper(BaseScraper):
 
                 if href in links_vistos:
                     continue
-                links_vistos.add(href)
 
                 data_pub = "Não informada"
                 m_data = re.match(r'^(\d{2}/\d{2}/\d{4})\s+(.*)', texto)
@@ -276,6 +289,10 @@ class SesiScraper(BaseScraper):
                 titulo = partes[0].strip()
                 descricao = partes[1].strip() if (len(partes) > 1 and partes[1].strip()) else titulo
 
+                if eh_item_ruido_ou_encerrado(titulo, href, descricao):
+                    continue
+
+                links_vistos.add(href)
                 itens.append(ItemBrutoEdital(
                     titulo=titulo[:200],
                     descricao=descricao[:1500],
@@ -283,11 +300,12 @@ class SesiScraper(BaseScraper):
                     link=href,
                     vigencia_inicio=data_pub,
                     prazo_proposto=_extrair_prazo(descricao),
-                    categorias="SESI-SP - Educação, Inovação e Indústria"
+                    categorias="SESI-SP - Educação, Robótica e Inovação"
                 ))
         except Exception as e:
             print(f"[{self.nome_fonte}] Erro ao acessar {url}: {e}")
 
+        itens = enriquecer_itens_via_html(itens, headers=DEFAULT_HEADERS, max_itens=10)
         print(f"[{self.nome_fonte}] Coleta concluída: {len(itens)} itens encontrados.")
         return itens
 
